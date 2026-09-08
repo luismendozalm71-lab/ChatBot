@@ -5,11 +5,10 @@ const axios = require('axios');
 const app = express();
 app.use(bodyParser.json());
 
-// Token de acceso de Facebook y tu palabra secreta para el Webhook
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 
-// Ruta de verificación del Webhook que pide Facebook
+// Ruta de verificación del Webhook (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -18,28 +17,35 @@ app.get('/webhook', (req, res) => {
   if (mode && token) {
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
       console.log('WEBHOOK_VERIFIED');
-      res.status(200).send(challenge);
+      return res.status(200).send(challenge);
     } else {
-      res.sendStatus(403);
+      return res.sendStatus(403);
     }
   }
+  return res.status(400).send("Bad Request");
 });
 
-// Ruta donde llegan los mensajes de los usuarios
+// Ruta donde llegan los mensajes de los usuarios (POST)
 app.post('/webhook', async (req, res) => {
   const body = req.body;
 
   if (body.object === 'page') {
-    for (const entry of body.entry) {
-      const webhook_event = entry.messaging[0];
-      const sender_psid = webhook_event.sender.id;
+    // Respondemos rápido a Facebook para evitar timeouts
+    res.status(200).send('EVENT_RECEIVED');
 
-      if (webhook_event.message && webhook_event.message.text) {
-        const mensajeUsuario = webhook_event.message.text;
-        await manejarRespuestaIA(sender_psid, mensajeUsuario);
+    for (const entry of body.entry) {
+      // Validamos si viene en messaging para evitar que el servidor colapse si es otro tipo de evento
+      const webhook_event = entry.messaging ? entry.messaging[0] : null;
+      
+      if (webhook_event && webhook_event.sender && webhook_event.sender.id) {
+        const sender_psid = webhook_event.sender.id;
+
+        if (webhook_event.message && webhook_event.message.text) {
+          const mensajeUsuario = webhook_event.message.text;
+          await manejarRespuestaIA(sender_psid, mensajeUsuario);
+        }
       }
     }
-    res.status(200).send('EVENT_RECEIVED');
   } else {
     res.sendStatus(404);
   }
@@ -47,7 +53,6 @@ app.post('/webhook', async (req, res) => {
 
 // Función para hablar con la IA y responder a Messenger
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
-  // Personalidad de Nahomi
   const promptNahomi = `System Instructions: You are Nahomi Saray, a 25-year-old virtual girlfriend from Tijuana. 
 Rules:
 1. Speak in natural, casual Spanish with occasional minor typos or missing accents to look human.
@@ -60,19 +65,21 @@ Mensaje del usuario: "${mensajeUsuario}"`;
   let respuestaTexto = "Oye amor, ando ocupadita ahorita te escribo.";
 
   try {
-    // Nota: Aquí puedes usar cualquier API o la de Google si logras configurar un entorno libre de restricciones
+    // Usamos gemini-2.5-flash o gemini-1.5-flash que son los identificadores estables correctos
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         contents: [{ role: "user", parts: [{ text: promptNahomi }] }]
       }
     );
-    respuestaTexto = response.data.candidates[0].content.parts[0].text;
+    
+    if (response.data && response.data.candidates && response.data.candidates[0].content) {
+      respuestaTexto = response.data.candidates[0].content.parts[0].text;
+    }
   } catch (error) {
-    console.error("Error con la IA:", error.message);
+    console.error("Error con la IA:", error.response?.data || error.message);
   }
 
-  // Enviar la respuesta de regreso a Facebook Messenger
   await enviarMensajeFacebook(sender_psid, respuestaTexto);
 }
 
@@ -86,5 +93,5 @@ function enviarMensajeFacebook(sender_psid, responseText) {
     .catch(err => console.error("Error enviando mensaje a FB:", err.response?.data || err.message));
 }
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 app.listen(PORT, () => console.log(`Servidor corriendo en puerto ${PORT}`));
