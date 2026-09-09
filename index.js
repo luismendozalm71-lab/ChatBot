@@ -77,7 +77,7 @@ Mensaje del usuario: "${mensajeUsuario}"`;
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
     }
   } catch (error) {
-    console.error("Error con la IA:", error.response?.data || error.message);
+    console.error("Error detallado con la IA:", error.response?.data || error.message);
   }
 
   await enviarMensajeFacebook(sender_psid, respuestaTexto);
