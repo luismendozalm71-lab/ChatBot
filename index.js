@@ -55,9 +55,8 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Función para hablar con la IA manteniendo historial y contexto
+// Función para hablar con la IA manteniendo historial y usando un modelo Lite anti-saturación
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
-  // Inicializamos el historial para este usuario si no existe
   if (!historialesUsuarios[sender_psid]) {
     historialesUsuarios[sender_psid] = [
       {
@@ -78,15 +77,12 @@ Rules:
     ];
   }
 
-  // Añadimos el nuevo mensaje del usuario al historial
   historialesUsuarios[sender_psid].push({
     role: "user",
     parts: [{ text: mensajeUsuario }]
   });
 
-  // Mantenemos solo los últimos 15 mensajes para que la memoria no crezca indefinidamente
   if (historialesUsuarios[sender_psid].length > 16) {
-    // Conservamos las instrucciones de sistema (índice 0) y los últimos 15 intercambios
     historialesUsuarios[sender_psid] = [
       historialesUsuarios[sender_psid][0],
       ...historialesUsuarios[sender_psid].slice(-15)
@@ -96,8 +92,9 @@ Rules:
   let respuestaTexto = "Oye amor, ando ocupadita ahorita te escribo.";
 
   try {
+    // Usando gemini-3.1-flash-lite para evitar el error 503 de alta demanda
     const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
         contents: historialesUsuarios[sender_psid]
       }
@@ -106,7 +103,6 @@ Rules:
     if (response.data && response.data.candidates && response.data.candidates[0].content) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
       
-      // Guardamos la respuesta de la IA en el historial para mantener el hilo de la conversación
       historialesUsuarios[sender_psid].push({
         role: "model",
         parts: [{ text: respuestaTexto }]
