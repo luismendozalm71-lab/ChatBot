@@ -66,7 +66,6 @@ Mensaje del usuario: "${mensajeUsuario}"`;
   let respuestaTexto = "Oye amor, ando ocupadita ahorita te escribo.";
 
   try {
-    // Apuntando a gemini-2.5-flash que está limpio en tu cuota gratuita
     const response = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
@@ -76,9 +75,19 @@ Mensaje del usuario: "${mensajeUsuario}"`;
     
     if (response.data && response.data.candidates && response.data.candidates[0].content) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
+    } else {
+      console.log("RESPUESTA EXTRAÑA DE GEMINI:", JSON.stringify(response.data));
     }
   } catch (error) {
-    console.error("Error detallado con la IA:", error.response?.data || error.message);
+    // Imprimimos el error crudo completo que devuelve Google en la consola de Render
+    console.error("--- ERROR CRITICO DE IA ---");
+    if (error.response) {
+      console.error("Data:", JSON.stringify(error.response.data, null, 2));
+      console.error("Status:", error.response.status);
+    } else {
+      console.error("Mensaje:", error.message);
+    }
+    console.error("---------------------------");
   }
 
   await enviarMensajeFacebook(sender_psid, respuestaTexto);
