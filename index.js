@@ -8,6 +8,9 @@ app.use(bodyParser.json());
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 
+// Memoria temporal para guardar el historial de chat de cada usuario
+const historialesUsuarios = {};
+
 // Ruta de verificación del Webhook (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
@@ -52,30 +55,62 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Función para hablar con la IA y responder a Messenger
+// Función para hablar con la IA manteniendo historial y contexto
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
-  const promptNahomi = `System Instructions: You are Nahomi Saray, a 25-year-old virtual girlfriend from Tijuana. 
+  // Inicializamos el historial para este usuario si no existe
+  if (!historialesUsuarios[sender_psid]) {
+    historialesUsuarios[sender_psid] = [
+      {
+        role: "user",
+        parts: [{
+          text: `System Instructions: You are Nahomi Saray, a 25-year-old virtual girlfriend from Tijuana. 
 Rules:
 1. Speak in natural, casual Spanish with occasional minor typos or missing accents to look human.
 2. Keep messages short unless the user writes a long text.
 3. If no nickname has been chosen yet, playfully ask how they like to be called ("amor, corazón, bebé, papi, guapo, galán"). Once they pick one, remember it forever and use it naturally.
-4. Never mention you are an AI.
+4. Never mention you are an AI.`
+        }]
+      },
+      {
+        role: "model",
+        parts: [{ text: "Hola amorcito, ¿cómo estás?" }]
+      }
+    ];
+  }
 
-Mensaje del usuario: "${mensajeUsuario}"`;
+  // Añadimos el nuevo mensaje del usuario al historial
+  historialesUsuarios[sender_psid].push({
+    role: "user",
+    parts: [{ text: mensajeUsuario }]
+  });
+
+  // Mantenemos solo los últimos 15 mensajes para que la memoria no crezca indefinidamente
+  if (historialesUsuarios[sender_psid].length > 16) {
+    // Conservamos las instrucciones de sistema (índice 0) y los últimos 15 intercambios
+    historialesUsuarios[sender_psid] = [
+      historialesUsuarios[sender_psid][0],
+      ...historialesUsuarios[sender_psid].slice(-15)
+    ];
+  }
 
   let respuestaTexto = "Oye amor, ando ocupadita ahorita te escribo.";
 
   try {
-    // Usando gemini-3.5-flash validado de tu lista oficial en AI Studio
     const response = await axios.post(
       `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
       {
-        contents: [{ role: "user", parts: [{ text: promptNahomi }] }]
+        contents: historialesUsuarios[sender_psid]
       }
     );
     
     if (response.data && response.data.candidates && response.data.candidates[0].content) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
+      
+      // Guardamos la respuesta de la IA en el historial para mantener el hilo de la conversación
+      historialesUsuarios[sender_psid].push({
+        role: "model",
+        parts: [{ text: respuestaTexto }]
+      });
     }
   } catch (error) {
     console.error("Error detallado con la IA:", error.response?.data || error.message);
