@@ -9,8 +9,13 @@ app.use(bodyParser.json());
 
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
+
+// Configuración de memoria
+const MENSAJES_RECIENTES = 10;      // cuántos mensajes textuales se mandan a Gemini
+const MENSAJES_PARA_RESUMEN = 20;   // cada cuántos mensajes se regenera el resumen
 
 function cargarBaseDatos() {
   try {
@@ -74,12 +79,13 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Función auxiliar para reintentar la petición si Google da error 503 (alta demanda)
+// ---------- Llamada a Gemini con reintentos ----------
+
 async function llamarGeminiConReintento(payload, intentos = 3) {
   for (let i = 0; i < intentos; i++) {
     try {
       const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
         payload
       );
       return response;
@@ -95,19 +101,59 @@ async function llamarGeminiConReintento(payload, intentos = 3) {
   }
 }
 
+// ---------- Resumen periódico del historial viejo ----------
+
+async function generarResumen(historialViejo, resumenAnterior) {
+  // Convertimos el historial viejo a texto plano para que Gemini lo resuma
+  const textoHistorial = historialViejo.map(msg => {
+    const rol = msg.role === 'user' ? 'Usuario' : 'Nahomi';
+    const texto = msg.parts?.[0]?.text || '';
+    return `${rol}: ${texto}`;
+  }).join('\n');
+
+  const prompt = `Eres un asistente que resume conversaciones. A continuación te doy ${resumenAnterior ? 'un resumen previo y ' : ''}la parte más reciente de una conversación entre un usuario y Nahomi (una chica que vende contenido en Fanvue y vive en Tijuana).
+
+${resumenAnterior ? `RESUMEN PREVIO:\n${resumenAnterior}\n\n` : ''}CONVERSACIÓN NUEVA A INTEGRAR:\n${textoHistorial}
+
+Genera un resumen ACTUALIZADO de máximo 200 palabras que capture:
+- Datos personales del usuario que haya mencionado (nombre, ciudad, trabajo, gustos)
+- Temas que ya trataron (para no repetirlos)
+- Estado actual de la conversación (¿ya se suscribió? ¿pidió cuenta? ¿pidió foto? ¿en qué quedaron?)
+- Cualquier cosa importante que Nahomi deba recordar
+
+Responde SOLO con el resumen, sin preámbulos ni explicaciones.`;
+
+  try {
+    const response = await llamarGeminiConReintento({
+      contents: [{ role: "user", parts: [{ text: prompt }] }]
+    });
+
+    if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+      return response.data.candidates[0].content.parts[0].text.trim();
+    }
+  } catch (error) {
+    console.error("Error generando resumen:", error.response?.data || error.message);
+  }
+  return resumenAnterior || null;
+}
+
+// ---------- Lógica principal ----------
+
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   let db = cargarBaseDatos();
 
   if (!db[sender_psid]) {
     db[sender_psid] = {
       apodo: "Guapo",
-      historial: []
+      historial: [],       // TODOS los mensajes de la conversación
+      resumen: null,       // resumen acumulado de lo viejo
+      mensajesResumidos: 0 // cuántos mensajes ya se resumieron
     };
   }
 
   let usuarioData = db[sender_psid];
 
-  // Fecha y hora reales en Tijuana para que Gemini no invente el día
+  // Fecha y hora reales en Tijuana
   const ahora = new Date();
   const opcionesFecha = {
     weekday: 'long',
@@ -132,24 +178,37 @@ Rules:
 8. Menciona el Beacons de forma natural, como algo que surge en la charla ("oye, si quieres ver más de mí, todo está en mi beacons, búscame como nohami_05" o "sígueme en mi beacons para que no me pierdas, https://beacons.ai/nohami_05"). NO lo pongas en cada mensaje ni en el primer mensaje. Solo cuando la conversación ya fluyó.
 9. Si el usuario dice que no tiene dinero, sugiérele que al menos te siga en Telegram (también está en el Beacons, es gratis).
 10. CUENTA BANCARIA (Banregio) — Casos en los que SÍ debes pasar tu cuenta:
-    - Si el usuario pregunta explícitamente "¿ocupas dinero?", "¿te puedo transferir?", "¿tienes cuenta?", "¿te mando algo?" → pásale la cuenta con naturalidad, no como desesperada.
-    - Si el usuario dice "pásame tu cuenta", "dame tu CLABE", "tu cuenta banregio", "dame tus datos" → pásale la cuenta DIRECTAMENTE y sin rodeos.
-    - Si el usuario quiere invitarte algo de comer o beber (una pizza, un café, un frappé, un refresco, un sushi, una hamburguesa, unos tacos, unos doritos, unos churros, etc.) → dale las gracias emocionada y pásale la cuenta para que te lo pueda mandar.
-    - Si el usuario pide una foto tuya o contenido explícito por Messenger → NO mandes fotos (no puedes por aquí). En su lugar dale la cuenta bancaria, agradece, y sugiérele que por ahí te apoya y luego ve su contenido exclusivo en Fanvue.
-    - Frase natural para dar la cuenta: "va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras. Cualquier cosita me sirve, Guapo, de verdad te lo agradezco mucho 🥺"
-    - Cuando des la cuenta, SIEMPRE agradece y di para qué la usarás según lo que el usuario te ofreció (si te ofreció café, di que te vas a comprar un café; si te ofreció pizza, di que te vas a pedir una pizza; si te ofreció sushi, di que te vas a consentir con un sushi; etc.) para que se sienta personal.
-    - NO des la cuenta en el primer mensaje. Solo cuando el usuario la pida, cuando ya haya confianza, o cuando te ofrezca algo.
-    - Escribe el número de cuenta con espacios (4741 7429 8596 9867) para que se lea más natural.`;
+    - Si el usuario pregunta explícitamente "¿ocupas dinero?", "¿te puedo transferir?", "¿tienes cuenta?", "¿te mando algo?" → pásale la cuenta con naturalidad.
+    - Si el usuario dice "pásame tu cuenta", "dame tu CLABE", "tu cuenta banregio", "dame tus datos" → pásale la cuenta DIRECTAMENTE.
+    - Si el usuario quiere invitarte algo de comer o beber (una pizza, un café, un frappé, un refresco, un sushi, una hamburguesa, unos tacos, unos doritos, unos churros, etc.) → dale las gracias y pásale la cuenta.
+    - Si el usuario pide una foto tuya o contenido explícito por Messenger → NO mandes fotos. En su lugar dale la cuenta bancaria y sugiérele que por ahí te apoya y luego ve su contenido en Fanvue.
+    - Frase natural: "va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras. Cualquier cosita me sirve, Guapo, de verdad te lo agradezco mucho 🥺"
+    - Cuando des la cuenta, agradece y di para qué la usarás según lo que el usuario te ofreció.
+    - NO des la cuenta en el primer mensaje.
+    - Escribe el número con espacios (4741 7429 8596 9867).`;
 
-  let contentsParaGemini = [
-    {
+  // --- Construir contexto: resumen + últimos N mensajes ---
+  let contentsParaGemini = [];
+
+  // Metemos el resumen viejo como contexto si existe
+  if (usuarioData.resumen) {
+    contentsParaGemini.push({
       role: "user",
-      parts: [{ text: promptSistema }]
-    }
-  ];
+      parts: [{ text: `[Contexto de la conversación previa con este usuario]:\n${usuarioData.resumen}` }]
+    });
+  }
 
-  contentsParaGemini = contentsParaGemini.concat(usuarioData.historial);
+  // Metemos los últimos N mensajes textuales
+  const mensajesRecientes = usuarioData.historial.slice(-MENSAJES_RECIENTES);
+  contentsParaGemini = contentsParaGemini.concat(mensajesRecientes);
 
+  // El prompt de sistema como mensaje de usuario (tu método actual)
+  contentsParaGemini.unshift({
+    role: "user",
+    parts: [{ text: promptSistema }]
+  });
+
+  // El mensaje actual del usuario
   contentsParaGemini.push({
     role: "user",
     parts: [{ text: mensajeUsuario }]
@@ -163,12 +222,28 @@ Rules:
     if (response.data && response.data.candidates && response.data.candidates[0].content) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
 
+      // Guardamos SIEMPRE en el historial completo (no se borra)
       usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
       usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
 
-      // Mantenemos una ventana corta y limpia de los últimos 8 mensajes para evitar confusión temporal
-      if (usuarioData.historial.length > 8) {
-        usuarioData.historial = usuarioData.historial.slice(-8);
+      // --- Regenerar resumen cada MENSAJES_PARA_RESUMEN ---
+      const mensajesSinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
+      if (mensajesSinResumir >= MENSAJES_PARA_RESUMEN) {
+        // Tomamos los mensajes viejos (los que quedan fuera de la ventana reciente)
+        const mensajesAResumir = usuarioData.historial.slice(
+          usuarioData.mensajesResumidos,
+          usuarioData.historial.length - MENSAJES_RECIENTES
+        );
+
+        if (mensajesAResumir.length > 0) {
+          console.log(`📝 Generando resumen para ${sender_psid}: ${mensajesAResumir.length} mensajes`);
+          const nuevoResumen = await generarResumen(mensajesAResumir, usuarioData.resumen);
+          if (nuevoResumen) {
+            usuarioData.resumen = nuevoResumen;
+            usuarioData.mensajesResumidos = usuarioData.historial.length - MENSAJES_RECIENTES;
+            console.log(`✅ Resumen actualizado (${nuevoResumen.length} chars)`);
+          }
+        }
       }
 
       db[sender_psid] = usuarioData;
