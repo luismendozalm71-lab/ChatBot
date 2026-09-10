@@ -10,7 +10,6 @@ app.use(bodyParser.json());
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 
-// Archivo local de respaldo
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
 
 function cargarBaseDatos() {
@@ -33,7 +32,6 @@ function guardarBaseDatos(db) {
   }
 }
 
-// Ruta de verificación del Webhook (GET)
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -50,7 +48,6 @@ app.get('/webhook', (req, res) => {
   return res.status(400).send("Bad Request");
 });
 
-// Ruta donde llegan los mensajes de los usuarios (POST)
 app.post('/webhook', async (req, res) => {
   const body = req.body;
   
@@ -77,44 +74,57 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Función para hablar con la IA con memoria persistente y contexto inteligente
+// Función auxiliar para reintentar la petición si Google da error 503 (alta demanda)
+async function llamarGeminiConReintento(payload, intentos = 3) {
+  for (let i = 0; i < intentos; i++) {
+    try {
+      const response = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        payload
+      );
+      return response;
+    } catch (error) {
+      const status = error.response?.status;
+      if ((status === 503 || status === 429) && i < intentos - 1) {
+        console.warn(`Intento ${i + 1} fallido por saturación (503/429). Reintentando en 1.5 segundos...`);
+        await new Promise(resolve => setTimeout(resolve, 1500));
+      } else {
+        throw error;
+      }
+    }
+  }
+}
+
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   let db = cargarBaseDatos();
 
   if (!db[sender_psid]) {
     db[sender_psid] = {
-      apodo: "Corazón", // Predeterminado para evitar que lo vuelva a pedir
-      resumenContexto: "Se acaban de conocer, al usuario le gusta ver películas de Netflix hasta tarde y vive en Sonora.",
-      historial: [
-        {
-          role: "model",
-          parts: [{ text: "Hola amorcito, ¿cómo estás?" }]
-        }
-      ]
+      apodo: "Guapo",
+      resumenContexto: "El usuario se encuentra trabajando igual que Nahomi. Tienen una diferencia de horario (Tijuana vs Sonora). Ya pasaron las charlas de Netflix y van iniciando el día laboral.",
+      historial: []
     };
   }
 
   let usuarioData = db[sender_psid];
 
-  // Detectamos si el usuario mencionó algo importante para actualizar el contexto persistente
+  // Actualización dinámica inteligente de contexto
   const textoLower = mensajeUsuario.toLowerCase();
-  if (textoLower.includes("estetica") || textoLower.includes("estética")) {
-    usuarioData.resumenContexto += " El usuario mencionó que Nahomi es estilista y tiene una estética.";
+  if (textoLower.includes("trabajo") || textoLower.includes("jale")) {
+    usuarioData.resumenContexto = "Ambos están ocupados trabajando en sus respectivos empleos hoy por la mañana.";
   }
-  if (textoLower.includes("sonora")) {
-    usuarioData.resumenContexto += " El usuario vive en Sonora (zona horaria avanzada).";
-  }
-  if (textoLower.includes("netflix") || textoLower.includes("pelis") || textoLower.includes("pelicula")) {
-    usuarioData.resumenContexto += " Platicaron sobre ver películas de Netflix hasta tarde y quedarse dormidos tarde.";
+  if (textoLower.includes("no quiero hablar de netflix") || textoLower.includes("basta de netflix")) {
+    usuarioData.resumenContexto = "El usuario pidió explícitamente cambiar de tema y no hablar más de películas de Netflix.";
   }
 
-  const promptSistema = `System Instructions: You are Nahomi Saray, a 25-year-old virtual girlfriend from Tijuana who used to live/study psychology in CDMX and works/worked in a beauty salon (estética). 
+  const promptSistema = `System Instructions: You are Nahomi Saray, a 25-year-old virtual girlfriend from Tijuana who used to live in CDMX and works in a beauty salon (estética). 
 Rules:
 1. Speak in natural, casual Spanish with occasional minor typos or missing accents to look human.
 2. Keep messages short unless the user writes a long text.
-3. Call the user by his preferred nickname: "${usuarioData.apodo}".
-4. Contexto previo importante que NUNCA debes olvidar: ${usuarioData.resumenContexto}
-5. Never mention you are an AI.`;
+3. Call the user exclusively by his preferred nickname: "${usuarioData.apodo}".
+4. Contexto actual de su relación: ${usuarioData.resumenContexto}
+5. Sé coherente con el tiempo actual (si es de día, habla de actividades matutinas o del trabajo actual, no mezcles cosas de la madrugada anterior a menos que sea necesario).
+6. Never mention you are an AI.`;
 
   let contentsParaGemini = [
     {
@@ -130,15 +140,10 @@ Rules:
     parts: [{ text: mensajeUsuario }]
   });
 
-  let respuestaTexto = "Oye amor, ando ocupadita ahorita te escribo.";
+  let respuestaTexto = "Oye amor, ando en la estética acomodando unas cosas, ahorita te marco bien.";
 
   try {
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        contents: contentsParaGemini
-      }
-    );
+    const response = await llamarGeminiConReintento({ contents: contentsParaGemini });
     
     if (response.data && response.data.candidates && response.data.candidates[0].content) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
@@ -146,16 +151,16 @@ Rules:
       usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
       usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
 
-      // Mantenemos una ventana optimizada de mensajes recientes
-      if (usuarioData.historial.length > 16) {
-        usuarioData.historial = usuarioData.historial.slice(-15);
+      // Mantenemos una ventana corta y limpia de los últimos 8 mensajes para evitar confusión temporal
+      if (usuarioData.historial.length > 8) {
+        usuarioData.historial = usuarioData.historial.slice(-8);
       }
 
       db[sender_psid] = usuarioData;
       guardarBaseDatos(db);
     }
   } catch (error) {
-    console.error("Error detallado con la IA:", error.response?.data || error.message);
+    console.error("Error definitivo con la IA tras reintentos:", error.response?.data || error.message);
   }
 
   await enviarMensajeFacebook(sender_psid, respuestaTexto);
