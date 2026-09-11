@@ -59,8 +59,9 @@ function getHoraTijuana() {
 
 function getEstadoNahomi() {
   const { totalMinutos } = getHoraTijuana();
-  const INICIO = 9 * 60 + 20;   // 09:20
-  const FIN = 22 * 60 + 20;      // 22:20
+  const INICIO = 9 * 60 + 0;    // 09:00 AM
+  const FIN = 22 * 60 + 20;     // 22:20 (10:20 PM)
+  
   if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
   return "durmiendo";
 }
@@ -192,7 +193,7 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
 
   // ============================================================
-  // CASO 1: Nahomi está DORMIDA (después de 22:20 o antes de 09:20)
+  // CASO 1: Nahomi está DORMIDA (después de 22:20 o antes de 09:00)
   // ============================================================
   if (estado === "durmiendo") {
     const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
@@ -221,7 +222,7 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   }
 
   // ============================================================
-  // CASO 2: Nahomi está ACTIVA (09:20 a 22:19)
+  // CASO 2: Nahomi está ACTIVA (09:00 a 22:19)
   // ============================================================
 
   const ahora = new Date();
@@ -327,7 +328,7 @@ Usuario: "ocupas dinero?"
 Tú: "ay guapo ps si, la verdad si me ayudaria mucho 🥺 ||| te paso mi cuenta por si gustas, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
 
 Usuario: "mandame una foto"
-Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar para un cafesito o algo, te paso mi cuenta: Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| y si quieres ver contenido, todo esta en mi beacons: https://beacons.ai/nohami_05"`;
+Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar para un cafesito o algo, te paso mi cuenta: Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| y si quieres ver contenido, todo esta en mi beacons: https://beacons.ai/nohami_05`;
 
   let contentsParaGemini = [{
     role: "user",
