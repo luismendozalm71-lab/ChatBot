@@ -11,6 +11,10 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+// ============================================================
+// CONFIGURACIÓN DE MODELOS EN CASCADA
+// Ordenados por calidad (del mejor al más básico)
+// ============================================================
 const MODELOS_GEMINI = [
   'gemini-3.8-flash',
   'gemini-3.7-flash',
@@ -20,9 +24,12 @@ const MODELOS_GEMINI = [
   'gemini-3.5-flash-lite'
 ];
 
-const ESPERA_CICLO_MS = 30 * 60 * 1000;
-const RESET_CICLO_MS = 24 * 60 * 60 * 1000;
-const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;
+// ============================================================
+// TIEMPOS (corregidos)
+// ============================================================
+const ESPERA_CICLO_MS = 30 * 60 * 1000;              // 30 min si TODOS fallan
+const RESET_CICLO_MS = 28 * 24 * 60 * 60 * 1000;     // 28 DÍAS (no 24 horas)
+const REINTENTO_SUPERIOR_MS = 7 * 24 * 60 * 60 * 1000; // 7 DÍAS para reintentar superiores
 
 const ESTADO_FILE = path.join(__dirname, 'estado_modelos.json');
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
@@ -31,13 +38,18 @@ const MENSAJES_RECIENTES = 10;
 const MENSAJES_PARA_RESUMEN = 20;
 
 let estadoPersistente = cargarEstado();
-if (!estadoPersistente.modelosAgotadosHoy) estadoPersistente.modelosAgotadosHoy = [];
+if (!estadoPersistente.modelosAgotados) estadoPersistente.modelosAgotados = [];
 
 function cargarEstado() {
   try {
     if (fs.existsSync(ESTADO_FILE)) return JSON.parse(fs.readFileSync(ESTADO_FILE, 'utf8'));
   } catch (e) { console.error("Error estado:", e); }
-  return { indiceUltimoModeloExitoso: 0, ultimoReinicioCiclo: Date.now(), ultimoIntentoSuperior: Date.now(), modelosAgotadosHoy: [] };
+  return { 
+    indiceUltimoModeloExitoso: 0, 
+    ultimoReinicioCiclo: Date.now(), 
+    ultimoIntentoSuperior: Date.now(), 
+    modelosAgotados: [] 
+  };
 }
 
 function guardarEstado(estado) {
@@ -59,10 +71,11 @@ function guardarBaseDatos(db) {
 function debeReiniciarCiclo() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoReinicioCiclo >= RESET_CICLO_MS) {
+    console.log(`🔄 Han pasado 28 días. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
     estadoPersistente.ultimoReinicioCiclo = ahora;
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     estadoPersistente.ultimoIntentoSuperior = ahora;
-    estadoPersistente.modelosAgotadosHoy = [];
+    estadoPersistente.modelosAgotados = [];
     guardarEstado(estadoPersistente);
     return true;
   }
@@ -72,6 +85,7 @@ function debeReiniciarCiclo() {
 function debeReintentarSuperiores() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoIntentoSuperior >= REINTENTO_SUPERIOR_MS) {
+    console.log(`🔄 Han pasado 7 días. Reintentando desde el modelo más alto...`);
     estadoPersistente.ultimoIntentoSuperior = ahora;
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     guardarEstado(estadoPersistente);
@@ -138,7 +152,7 @@ app.post('/webhook', async (req, res) => {
 });
 
 async function llamarGeminiConReintento(payload) {
-  if (debeReiniciarCiclo()) console.log(`🔄 Ciclo reiniciado desde ${MODELOS_GEMINI[0]}`);
+  if (debeReiniciarCiclo()) console.log(`🔄 Ciclo de 28 días reiniciado`);
   if (debeReintentarSuperiores()) console.log(`🔄 Reintentando desde el más alto`);
 
   let indiceInicio = estadoPersistente.indiceUltimoModeloExitoso;
@@ -146,8 +160,8 @@ async function llamarGeminiConReintento(payload) {
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
-    if (estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
-      console.log(`⏭️ ${modeloActual} agotado hoy, saltando...`);
+    if (estadoPersistente.modelosAgotados.includes(modeloActual)) {
+      console.log(`⏭️ ${modeloActual} marcado como agotado (28 días), saltando...`);
       continue;
     }
     try {
@@ -165,9 +179,9 @@ async function llamarGeminiConReintento(payload) {
     } catch (error) {
       const status = error.response?.status;
       if (status === 429 || status === 503) {
-        console.warn(`⚠️ ${modeloActual} agotado (${status})`);
-        if (!estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
-          estadoPersistente.modelosAgotadosHoy.push(modeloActual);
+        console.warn(`⚠️ ${modeloActual} agotado por 28 días (${status})`);
+        if (!estadoPersistente.modelosAgotados.includes(modeloActual)) {
+          estadoPersistente.modelosAgotados.push(modeloActual);
         }
         estadoPersistente.indiceUltimoModeloExitoso = i + 1;
         guardarEstado(estadoPersistente);
@@ -182,7 +196,7 @@ async function llamarGeminiConReintento(payload) {
   estadoPersistente.ultimoReinicioCiclo = Date.now();
   estadoPersistente.ultimoIntentoSuperior = Date.now();
   estadoPersistente.indiceUltimoModeloExitoso = 0;
-  estadoPersistente.modelosAgotadosHoy = [];
+  estadoPersistente.modelosAgotados = [];
   guardarEstado(estadoPersistente);
   return llamarGeminiConReintento(payload);
 }
@@ -429,4 +443,4 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 }
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} - Cuotas de 28 días`));
