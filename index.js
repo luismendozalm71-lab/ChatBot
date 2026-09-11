@@ -38,6 +38,39 @@ function guardarBaseDatos(db) {
   }
 }
 
+// ---------- Control de horario ----------
+
+function getHoraTijuana() {
+  const ahora = new Date();
+  const formato = new Intl.DateTimeFormat('es-MX', {
+    timeZone: 'America/Tijuana',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  });
+  const partes = formato.formatToParts(ahora);
+  const hora = parseInt(partes.find(p => p.type === 'hour').value, 10);
+  const minuto = parseInt(partes.find(p => p.type === 'minute').value, 10);
+  return { hora, minuto, totalMinutos: hora * 60 + minuto };
+}
+
+function getEstadoNahomi() {
+  const { totalMinutos } = getHoraTijuana();
+  const INICIO = 9 * 60 + 20;   // 09:20
+  const FIN = 22 * 60 + 20;      // 22:20
+  if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
+  return "durmiendo";
+}
+
+function esMensajeBuenasNoches(texto) {
+  const t = texto.toLowerCase();
+  return t.includes("buenas noches") ||
+         t.includes("buenos dias") ||
+         t.includes("descansa") ||
+         t.includes("que sueñes") ||
+         t.includes("que descanses");
+}
+
 // ---------- Webhook ----------
 
 app.get('/webhook', (req, res) => {
@@ -145,11 +178,50 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
       historial: [],
       resumen: null,
       mensajesResumidos: 0,
-      ultimaInteraccion: Date.now()
+      ultimaInteraccion: Date.now(),
+      ultimaDespedida: null
     };
   }
 
   let usuarioData = db[sender_psid];
+
+  const estado = getEstadoNahomi();
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
+
+  // ============================================================
+  // CASO 1: Nahomi está DORMIDA (después de 22:20 o antes de 09:20)
+  // ============================================================
+  if (estado === "durmiendo") {
+    const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
+
+    // Solo contesta UNA VEZ al día si le dicen buenas noches
+    if (esBuenasNoches && usuarioData.ultimaDespedida !== hoy) {
+      const respuestasDespedida = [
+        "buenas noches guapo, sueña conmigo 😘",
+        "descansa guapo, yo ya me voy a dormir. sueña conmigo 😏",
+        "buenas noches guapo, que sueñes bonito... conmigo obvio jaja 😘",
+        "ya me voy a dormir guapo, sueña conmigo 💕"
+      ];
+      const respuesta = respuestasDespedida[Math.floor(Math.random() * respuestasDespedida.length)];
+
+      usuarioData.ultimaDespedida = hoy;
+      usuarioData.ultimaInteraccion = Date.now();
+      db[sender_psid] = usuarioData;
+      guardarBaseDatos(db);
+
+      console.log(`🌙 Despedida nocturna enviada a ${sender_psid}`);
+      await enviarMensajeFacebook(sender_psid, respuesta);
+      return;
+    }
+
+    // Cualquier otro mensaje después de dormida → silencio total
+    console.log(`😴 Nahomi está dormida. Ignorando mensaje de ${sender_psid}: "${mensajeUsuario}"`);
+    return;
+  }
+
+  // ============================================================
+  // CASO 2: Nahomi está ACTIVA (09:20 a 22:19)
+  // ============================================================
 
   const ahora = new Date();
   const fechaActual = ahora.toLocaleString('es-MX', {
@@ -231,6 +303,8 @@ REGLAS:
       - Cuando des la cuenta, agradece y di para qué la usarás (según el antojo que mencionaste antes).
       - Siempre suena natural, coqueta, nunca desesperada.
 
+9. HORARIO: Si en el mensaje del usuario o en la conversación detectas que ya es tarde (después de las 22:00), puedes empezar a despedirte. A las 22:20 en punto ya te vas a dormir.
+
 EJEMPLOS DE CÓMO DEBES ESCRIBIR:
 
 Usuario: "hola"
@@ -310,6 +384,17 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     console.error("Error IA:", error.response?.data || error.message);
   }
 
+  // ============================================================
+  // Si ya son >= 22:20 (hora Tijuana), forzar despedida una vez
+  // ============================================================
+  const { totalMinutos } = getHoraTijuana();
+  const SON_LAS_2220 = totalMinutos >= (22 * 60 + 20);
+
+  if (SON_LAS_2220 && usuarioData.ultimaDespedida !== hoy) {
+    respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
+    usuarioData.ultimaDespedida = hoy;
+  }
+
   usuarioData.ultimaInteraccion = Date.now();
   db[sender_psid] = usuarioData;
   guardarBaseDatos(db);
@@ -322,7 +407,6 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
 async function enviarMensajesDivididos(sender_psid, textoCompleto) {
   let partes = textoCompleto.split(/\|\|\|/).map(p => p.trim()).filter(p => p.length > 0);
 
-  // Si no usó ||| pero el mensaje es muy largo, dividirlo por oraciones
   if (partes.length === 1 && textoCompleto.length > 220) {
     const oraciones = textoCompleto
       .split(/(?<=[.!?])\s+/)
@@ -342,7 +426,6 @@ async function enviarMensajesDivididos(sender_psid, textoCompleto) {
     if (buffer) partes.push(buffer.trim());
   }
 
-  // Regla especial: si menciona la cuenta Banregio, permitir hasta 3 mensajes
   const contieneCuenta = /banregio|4741/i.test(textoCompleto);
   const maxPartes = contieneCuenta ? 3 : 2;
   partes = partes.slice(0, maxPartes);
