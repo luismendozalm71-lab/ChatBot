@@ -11,8 +11,41 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Modelo estable: Gemini 3.5 Flash Lite (500 RPD)
-const GEMINI_MODEL = 'gemini-3.5-flash-lite';
+// ============================================================
+// CONFIGURACIÓN DE MODELOS EN CASCADA (Del más nuevo al más obsoleto)
+// ============================================================
+const MODELOS_GEMINI = [
+  'gemini-3.8-flash',        // El más nuevo (mejor calidad)
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2-flash',          // Ilimitado (nunca da 429)
+  'gemini-2-flash-lite'      // Ilimitado (nunca da 429)
+];
+
+const ESPERA_CICLO_MS = 30 * 60 * 1000;         // 30 min si se agotan todos
+const RESET_CICLO_MS = 24 * 60 * 60 * 1000;     // 24 horas para reiniciar desde el mejor modelo
+
+// Guardamos en memoria cuándo fue el último reinicio de ciclo
+let ultimoReinicioCiclo = Date.now();
+
+// ============================================================
+// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO
+// ============================================================
+function debeReiniciarCiclo() {
+  const ahora = Date.now();
+  if (ahora - ultimoReinicioCiclo >= RESET_CICLO_MS) {
+    console.log(`🔄 Han pasado 24 horas. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
+    ultimoReinicioCiclo = ahora;
+    return true;
+  }
+  return false;
+}
 
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
 
@@ -115,26 +148,51 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- Llamada a Gemini ----------
+// ---------- Llamada a Gemini con Failover en Cascada ----------
 
-async function llamarGeminiConReintento(payload, intentos = 3) {
-  for (let i = 0; i < intentos; i++) {
+async function llamarGeminiConReintento(payload) {
+  // Verificamos si ya pasaron 24 horas para reiniciar el ciclo
+  if (debeReiniciarCiclo()) {
+    console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
+  }
+
+  // Intentamos con cada modelo en orden descendente (del mejor al peor)
+  for (let i = 0; i < MODELOS_GEMINI.length; i++) {
+    const modeloActual = MODELOS_GEMINI[i];
+    
     try {
+      console.log(`🤖 Intentando con modelo: ${modeloActual}`);
       const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${modeloActual}:generateContent?key=${GEMINI_API_KEY}`,
         payload
       );
+      // Si funciona, retornamos la respuesta inmediatamente
       return response;
+      
     } catch (error) {
       const status = error.response?.status;
-      if ((status === 503 || status === 429) && i < intentos - 1) {
-        console.warn(`Intento ${i + 1} fallido (${status}). Reintentando en 1.5s...`);
-        await new Promise(r => setTimeout(r, 1500));
-      } else {
-        throw error;
-      }
+      
+      // Si es error de cuota (429) o servicio no disponible (503)
+      if (status === 429 || status === 503) {
+        console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Saltando al siguiente...`);
+        continue; // Salta al siguiente modelo en el array
+      } 
+      
+      // Si es otro tipo de error (ej. 400 Bad Request), lanzamos el error
+      throw error;
     }
   }
+
+  // Si llegamos aquí, TODOS los modelos fallaron (incluyendo los ilimitados, lo cual es raro)
+  console.error(`❌ TODOS los modelos agotados o fallando. Esperando ${ESPERA_CICLO_MS / 60000} minutos para reintentar el ciclo...`);
+  
+  // Esperamos 30 minutos antes de volver a intentar
+  await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
+  
+  // Después de esperar, reiniciamos el ciclo
+  ultimoReinicioCiclo = Date.now();
+  console.log(`🔄 Reintentando ciclo completo desde ${MODELOS_GEMINI[0]}...`);
+  return llamarGeminiConReintento(payload);
 }
 
 // ---------- Resumen periódico ----------
@@ -463,4 +521,4 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 // ---------- Arranque ----------
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con modelo ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada y Reset cada 24h`));
