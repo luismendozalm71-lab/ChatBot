@@ -19,7 +19,7 @@ const MODELOS_GEMINI = [
   'gemini-3.7-flash',
   'gemini-3.6-flash',
   'gemini-3.5-flash',
-  'gemini-3-flash-preview',  // CORREGIDO: El ID correcto lleva el sufijo -preview
+  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite',
   'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
@@ -31,8 +31,12 @@ const MODELOS_GEMINI = [
 const ESPERA_CICLO_MS = 30 * 60 * 1000;         // 30 min si se agotan todos
 const RESET_CICLO_MS = 24 * 60 * 60 * 1000;     // 24 horas para reiniciar desde el mejor modelo
 
-// Guardamos en memoria cuándo fue el último reinicio de ciclo
+// ============================================================
+// MEMORIA DEL ÚLTIMO MODELO EXITOSO
+// ============================================================
 let ultimoReinicioCiclo = Date.now();
+let indiceUltimoModeloExitoso = 0; // Empezamos desde el más nuevo
+let ultimoModeloExitoso = MODELOS_GEMINI[0];
 
 // ============================================================
 // FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO
@@ -42,6 +46,8 @@ function debeReiniciarCiclo() {
   if (ahora - ultimoReinicioCiclo >= RESET_CICLO_MS) {
     console.log(`🔄 Han pasado 24 horas. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
     ultimoReinicioCiclo = ahora;
+    indiceUltimoModeloExitoso = 0;
+    ultimoModeloExitoso = MODELOS_GEMINI[0];
     return true;
   }
   return false;
@@ -156,8 +162,11 @@ async function llamarGeminiConReintento(payload) {
     console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
   }
 
-  // Intentamos con cada modelo en orden descendente (del mejor al peor)
-  for (let i = 0; i < MODELOS_GEMINI.length; i++) {
+  // Empezamos desde el último modelo exitoso (para no gastar requests en modelos saturados)
+  let indiceInicio = indiceUltimoModeloExitoso;
+  console.log(`🎯 Empezando desde el índice ${indiceInicio} (${MODELOS_GEMINI[indiceInicio]})`);
+
+  for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
     
     try {
@@ -166,31 +175,35 @@ async function llamarGeminiConReintento(payload) {
         `https://generativelanguage.googleapis.com/v1beta/models/${modeloActual}:generateContent?key=${GEMINI_API_KEY}`,
         payload
       );
-      // Si funciona, retornamos la respuesta inmediatamente
+      
+      // ¡Funcionó! Guardamos este modelo como el último exitoso
+      indiceUltimoModeloExitoso = i;
+      ultimoModeloExitoso = modeloActual;
+      console.log(`✅ Éxito con ${modeloActual}. Recordando para la próxima vez.`);
       return response;
       
     } catch (error) {
       const status = error.response?.status;
       
-      // Si es error de cuota (429) o servicio no disponible (503)
       if (status === 429 || status === 503) {
         console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Saltando al siguiente...`);
-        continue; // Salta al siguiente modelo en el array
+        // Si este modelo falló, el siguiente intento empezará desde el siguiente índice
+        indiceUltimoModeloExitoso = i + 1;
+        continue;
       } 
       
-      // Si es otro tipo de error (ej. 400 Bad Request), lanzamos el error
       throw error;
     }
   }
 
-  // Si llegamos aquí, TODOS los modelos fallaron (incluyendo los ilimitados, lo cual es raro)
-  console.error(`❌ TODOS los modelos agotados o fallando. Esperando ${ESPERA_CICLO_MS / 60000} minutos para reintentar el ciclo...`);
-  
-  // Esperamos 30 minutos antes de volver a intentar
+  // Si llegamos aquí, TODOS los modelos fallaron
+  console.error(`❌ TODOS los modelos agotados. Esperando ${ESPERA_CICLO_MS / 60000} minutos...`);
   await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
   
-  // Después de esperar, reiniciamos el ciclo
+  // Reiniciamos el ciclo desde el principio
   ultimoReinicioCiclo = Date.now();
+  indiceUltimoModeloExitoso = 0;
+  ultimoModeloExitoso = MODELOS_GEMINI[0];
   console.log(`🔄 Reintentando ciclo completo desde ${MODELOS_GEMINI[0]}...`);
   return llamarGeminiConReintento(payload);
 }
