@@ -32,22 +32,51 @@ const ESPERA_CICLO_MS = 30 * 60 * 1000;         // 30 min si se agotan todos
 const RESET_CICLO_MS = 24 * 60 * 60 * 1000;     // 24 horas para reiniciar desde el mejor modelo
 
 // ============================================================
-// MEMORIA DEL ÚLTIMO MODELO EXITOSO
+// ARCHIVO DE ESTADO PERSISTENTE (para sobrevivir reinicios de Render)
 // ============================================================
-let ultimoReinicioCiclo = Date.now();
-let indiceUltimoModeloExitoso = 0; // Empezamos desde el más nuevo
-let ultimoModeloExitoso = MODELOS_GEMINI[0];
+const ESTADO_FILE = path.join(__dirname, 'estado_modelos.json');
+
+// Cargamos el estado desde disco (si existe)
+function cargarEstado() {
+  try {
+    if (fs.existsSync(ESTADO_FILE)) {
+      const data = fs.readFileSync(ESTADO_FILE, 'utf8');
+      const estado = JSON.parse(data);
+      console.log(`📂 Estado cargado: índice ${estado.indiceUltimoModeloExitoso} (${MODELOS_GEMINI[estado.indiceUltimoModeloExitoso] || 'N/A'})`);
+      return estado;
+    }
+  } catch (error) {
+    console.error("Error leyendo estado_modelos.json:", error);
+  }
+  // Si no existe, devolvemos el estado por defecto
+  return {
+    indiceUltimoModeloExitoso: 0,
+    ultimoReinicioCiclo: Date.now()
+  };
+}
+
+// Guardamos el estado en disco
+function guardarEstado(estado) {
+  try {
+    fs.writeFileSync(ESTADO_FILE, JSON.stringify(estado, null, 2), 'utf8');
+  } catch (error) {
+    console.error("Error guardando estado_modelos.json:", error);
+  }
+}
+
+// Cargamos el estado al arrancar el servidor
+let estadoPersistente = cargarEstado();
 
 // ============================================================
-// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO
+// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO (24 HORAS)
 // ============================================================
 function debeReiniciarCiclo() {
   const ahora = Date.now();
-  if (ahora - ultimoReinicioCiclo >= RESET_CICLO_MS) {
+  if (ahora - estadoPersistente.ultimoReinicioCiclo >= RESET_CICLO_MS) {
     console.log(`🔄 Han pasado 24 horas. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
-    ultimoReinicioCiclo = ahora;
-    indiceUltimoModeloExitoso = 0;
-    ultimoModeloExitoso = MODELOS_GEMINI[0];
+    estadoPersistente.ultimoReinicioCiclo = ahora;
+    estadoPersistente.indiceUltimoModeloExitoso = 0;
+    guardarEstado(estadoPersistente);
     return true;
   }
   return false;
@@ -162,8 +191,8 @@ async function llamarGeminiConReintento(payload) {
     console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
   }
 
-  // Empezamos desde el último modelo exitoso (para no gastar requests en modelos saturados)
-  let indiceInicio = indiceUltimoModeloExitoso;
+  // Empezamos desde el último modelo exitoso guardado en disco
+  let indiceInicio = estadoPersistente.indiceUltimoModeloExitoso;
   console.log(`🎯 Empezando desde el índice ${indiceInicio} (${MODELOS_GEMINI[indiceInicio]})`);
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
@@ -177,9 +206,11 @@ async function llamarGeminiConReintento(payload) {
       );
       
       // ¡Funcionó! Guardamos este modelo como el último exitoso
-      indiceUltimoModeloExitoso = i;
-      ultimoModeloExitoso = modeloActual;
-      console.log(`✅ Éxito con ${modeloActual}. Recordando para la próxima vez.`);
+      if (estadoPersistente.indiceUltimoModeloExitoso !== i) {
+        estadoPersistente.indiceUltimoModeloExitoso = i;
+        guardarEstado(estadoPersistente);
+        console.log(`💾 Modelo exitoso guardado: ${modeloActual} (índice ${i})`);
+      }
       return response;
       
     } catch (error) {
@@ -188,7 +219,8 @@ async function llamarGeminiConReintento(payload) {
       if (status === 429 || status === 503) {
         console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Saltando al siguiente...`);
         // Si este modelo falló, el siguiente intento empezará desde el siguiente índice
-        indiceUltimoModeloExitoso = i + 1;
+        estadoPersistente.indiceUltimoModeloExitoso = i + 1;
+        guardarEstado(estadoPersistente);
         continue;
       } 
       
@@ -201,9 +233,9 @@ async function llamarGeminiConReintento(payload) {
   await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
   
   // Reiniciamos el ciclo desde el principio
-  ultimoReinicioCiclo = Date.now();
-  indiceUltimoModeloExitoso = 0;
-  ultimoModeloExitoso = MODELOS_GEMINI[0];
+  estadoPersistente.ultimoReinicioCiclo = Date.now();
+  estadoPersistente.indiceUltimoModeloExitoso = 0;
+  guardarEstado(estadoPersistente);
   console.log(`🔄 Reintentando ciclo completo desde ${MODELOS_GEMINI[0]}...`);
   return llamarGeminiConReintento(payload);
 }
@@ -475,6 +507,14 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     return;
   }
 
+  // ============================================================
+  // DELAY HUMANO: Esperamos un poco antes de enviar la respuesta
+  // para simular que una persona real está escribiendo.
+  // ============================================================
+  const delayHumano = 1000 + Math.random() * 2000; // 1 a 3 segundos
+  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s antes de enviar (simulando escritura humana)...`);
+  await new Promise(r => setTimeout(r, delayHumano));
+
   usuarioData.ultimaInteraccion = Date.now();
   db[sender_psid] = usuarioData;
   guardarBaseDatos(db);
@@ -534,4 +574,4 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 // ---------- Arranque ----------
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada y Reset cada 24h`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada, Reset cada 24h y Estado Persistente`));
