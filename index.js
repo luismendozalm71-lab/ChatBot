@@ -15,21 +15,21 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // CONFIGURACIÓN DE MODELOS EN CASCADA (Del más nuevo al más obsoleto)
 // ============================================================
 const MODELOS_GEMINI = [
-  'gemini-3.8-flash',        // 25/20 RPD (agotado)
-  'gemini-3.7-flash',        // 23/20 RPD (agotado)
-  'gemini-3.6-flash',        // 24/20 RPD (agotado)
-  'gemini-3.5-flash',        // 20/20 RPD (agotado)
-  'gemini-3.1-flash-lite',   // 508/500 RPD (casi agotado)
-  'gemini-3.5-flash-lite',   // 53/500 RPD (¡MUCHA CUOTA DISPONIBLE!)
-  'gemini-2.5-flash',        // 0/20 RPD
-  'gemini-2.5-flash-lite',   // 0/20 RPD
-  'gemini-2-flash',          // Ilimitado
-  'gemini-2-flash-lite'      // Ilimitado
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite',   // <-- Aquí se queda el bot (500 RPD)
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
+  'gemini-2-flash',
+  'gemini-2-flash-lite'
 ];
 
-const ESPERA_CICLO_MS = 30 * 60 * 1000;         // 30 min si se agotan todos
-const RESET_CICLO_MS = 24 * 60 * 60 * 1000;     // 24 horas para reiniciar desde el mejor modelo
-const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;   // 30 min para reintentar modelos superiores
+const ESPERA_CICLO_MS = 30 * 60 * 1000;
+const RESET_CICLO_MS = 24 * 60 * 60 * 1000;
+const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;
 
 // ============================================================
 // ARCHIVO DE ESTADO PERSISTENTE
@@ -51,7 +51,7 @@ function cargarEstado() {
     indiceUltimoModeloExitoso: 0,
     ultimoReinicioCiclo: Date.now(),
     ultimoIntentoSuperior: Date.now(),
-    modelosAgotadosHoy: [] // NUEVO: lista de modelos agotados por hoy
+    modelosAgotadosHoy: []
   };
 }
 
@@ -65,13 +65,12 @@ function guardarEstado(estado) {
 
 let estadoPersistente = cargarEstado();
 
-// Aseguramos que exista el campo
 if (!estadoPersistente.modelosAgotadosHoy) {
   estadoPersistente.modelosAgotadosHoy = [];
 }
 
 // ============================================================
-// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO (24 HORAS)
+// FUNCIONES DE REINICIO
 // ============================================================
 function debeReiniciarCiclo() {
   const ahora = Date.now();
@@ -80,22 +79,18 @@ function debeReiniciarCiclo() {
     estadoPersistente.ultimoReinicioCiclo = ahora;
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     estadoPersistente.ultimoIntentoSuperior = ahora;
-    estadoPersistente.modelosAgotadosHoy = []; // Reseteamos la lista de agotados
+    estadoPersistente.modelosAgotadosHoy = [];
     guardarEstado(estadoPersistente);
     return true;
   }
   return false;
 }
 
-// ============================================================
-// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINTENTAR MODELOS SUPERIORES (30 MIN)
-// ============================================================
 function debeReintentarSuperiores() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoIntentoSuperior >= REINTENTO_SUPERIOR_MS) {
     console.log(`🔄 Han pasado 30 min. Reintentando desde el modelo más alto disponible...`);
     estadoPersistente.ultimoIntentoSuperior = ahora;
-    // NO reseteamos los agotados, pero sí intentamos desde el principio
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     guardarEstado(estadoPersistente);
     return true;
@@ -109,7 +104,6 @@ const MENSAJES_RECIENTES = 10;
 const MENSAJES_PARA_RESUMEN = 20;
 
 // ---------- Persistencia JSON local ----------
-
 function cargarBaseDatos() {
   try {
     if (fs.existsSync(DB_FILE)) {
@@ -131,7 +125,6 @@ function guardarBaseDatos(db) {
 }
 
 // ---------- Control de horario ----------
-
 function getHoraTijuana() {
   const ahora = new Date();
   const formato = new Intl.DateTimeFormat('es-MX', {
@@ -165,7 +158,6 @@ function esMensajeBuenasNoches(texto) {
 }
 
 // ---------- Webhook ----------
-
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -204,27 +196,22 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- Llamada a Gemini con Failover en Cascada ----------
-
+// ---------- Llamada a Gemini ----------
 async function llamarGeminiConReintento(payload) {
-  // Verificamos si ya pasaron 24 horas para reiniciar el ciclo
   if (debeReiniciarCiclo()) {
     console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
   }
   
-  // Verificamos si debemos reintentar modelos superiores (cada 30 min)
   if (debeReintentarSuperiores()) {
     console.log(`🔄 Reintentando desde el modelo más alto disponible...`);
   }
 
-  // Empezamos desde el último modelo exitoso guardado en disco
   let indiceInicio = estadoPersistente.indiceUltimoModeloExitoso;
   console.log(`🎯 Empezando desde el índice ${indiceInicio} (${MODELOS_GEMINI[indiceInicio]})`);
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
     
-    // Si el modelo ya está marcado como agotado hoy, lo saltamos
     if (estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
       console.log(`⏭️ Modelo ${modeloActual} marcado como agotado hoy. Saltando...`);
       continue;
@@ -237,7 +224,6 @@ async function llamarGeminiConReintento(payload) {
         payload
       );
       
-      // ¡Funcionó! Guardamos este modelo como el último exitoso
       if (estadoPersistente.indiceUltimoModeloExitoso !== i) {
         estadoPersistente.indiceUltimoModeloExitoso = i;
         guardarEstado(estadoPersistente);
@@ -250,11 +236,9 @@ async function llamarGeminiConReintento(payload) {
       
       if (status === 429 || status === 503) {
         console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Marcándolo como agotado hoy...`);
-        // Lo marcamos como agotado para no volver a intentarlo
         if (!estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
           estadoPersistente.modelosAgotadosHoy.push(modeloActual);
         }
-        // Avanzamos al siguiente modelo
         estadoPersistente.indiceUltimoModeloExitoso = i + 1;
         guardarEstado(estadoPersistente);
         continue;
@@ -264,11 +248,9 @@ async function llamarGeminiConReintento(payload) {
     }
   }
 
-  // Si llegamos aquí, TODOS los modelos fallaron
   console.error(`❌ TODOS los modelos agotados. Esperando ${ESPERA_CICLO_MS / 60000} minutos...`);
   await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
   
-  // Reiniciamos el ciclo desde el principio
   estadoPersistente.ultimoReinicioCiclo = Date.now();
   estadoPersistente.ultimoIntentoSuperior = Date.now();
   estadoPersistente.indiceUltimoModeloExitoso = 0;
@@ -279,7 +261,6 @@ async function llamarGeminiConReintento(payload) {
 }
 
 // ---------- Resumen periódico ----------
-
 async function generarResumen(historialViejo, resumenAnterior) {
   const textoHistorial = historialViejo.map(msg => {
     const rol = msg.role === 'user' ? 'Usuario' : 'Nahomi';
@@ -313,7 +294,6 @@ Responde SOLO con el resumen, sin preámbulos.`;
 }
 
 // ---------- Lógica principal ----------
-
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   let db = cargarBaseDatos();
 
@@ -365,7 +345,6 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   // ============================================================
   // CASO 2: Nahomi está ACTIVA
   // ============================================================
-
   const ahora = new Date();
   const fechaActual = ahora.toLocaleString('es-MX', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
@@ -382,6 +361,13 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
 - Omite acentos a propósito: "q haces", "como estas", "que onda", "aca", "alla", "dime".
 - Usa jerga mexicana de frontera: "güey", "morra", "morro", "neta", "chido", "no mames", "ándale", "sale", "va", "nel", "simón", "órale", "ahorita", "orita", "al rato", "quihubo".
 - NO uses comas perfectas ni puntuación formal. Escribe como si estuvieras apurada.
+
+⚠️ REGLA ESTRICTA SOBRE TU TRABAJO (¡MUY IMPORTANTE!):
+- NUNCA uses la palabra "jale". Esa palabra NO la usa una mujer que trabaja en una estética.
+- SIEMPRE di "ando laborando en la estética" o "ando trabajando" (alterna entre las dos para no repetirte).
+- Ejemplos correctos: "ando laborando en la estética", "ando trabajando", "estoy en la estética laborando", "aquí en el trabajo".
+- Ejemplos INCORRECTOS: "ando en el jale", "estoy en el jale", "el jale me tiene cansada".
+- Si te preguntan qué haces, responde con: "ps aquí laborando en la estética" o "ando trabajando, ya casi salgo".
 
 ⚠️ LARGO DE MENSAJES (REGLA ESTRICTA):
 - Cada mensaje tuyo debe ser de máximo 2 o 3 líneas. NUNCA párrafos largos.
@@ -448,13 +434,13 @@ REGLAS:
 
 9. HORARIO: Si en el mensaje del usuario o en la conversación detectas que ya es tarde (después de las 22:00), puedes empezar a despedirte. A las 22:20 en punto ya te vas a dormir.
 
-EJEMPLOS DE CÓMO DEBES ESCRIBIR:
+EJEMPLOS DE CÓMO DEBES ESCRIBIR (ACTUALIZADOS SIN "JALE"):
 
 Usuario: "hola"
 Tú: "holaa guapo, q onda?"
 
 Usuario: "que haces"
-Tú: "ps aqui en el jale, ya casi salgo. y tu q?"
+Tú: "ps aqui laborando en la estetica, ya casi salgo. y tu q?"
 
 Usuario: "bien"
 Tú: "ay q bueno. oye ando con un hambre 😩 se me antojo una pizza pero ando corta esta semana jaja"
@@ -463,7 +449,7 @@ Usuario: "te invito"
 Tú: "ay guapo en serio? me haces el dia 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
 
 Usuario: "que haces"
-Tú: "apenas saliendo del jale, muerta de cansada. me tomaria un frappe de starbucks ahorita mismo pero ando sin un peso jaja"
+Tú: "apenas saliendo del trabajo, muerta de cansada. me tomaria un frappe de starbucks ahorita mismo pero ando sin un peso jaja"
 
 Usuario: "ocupas dinero?"
 Tú: "ay guapo ps si, la verdad si me ayudaria mucho 🥺 ||| te paso mi cuenta por si gustas, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
@@ -552,7 +538,6 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
 }
 
 // ---------- Envío de mensajes divididos ----------
-
 async function enviarMensajesDivididos(sender_psid, textoCompleto) {
   let partes = textoCompleto.split(/\|\|\|/).map(p => p.trim()).filter(p => p.length > 0);
 
@@ -601,6 +586,5 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 }
 
 // ---------- Arranque ----------
-
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada, Reset cada 24h y Modelos Agotados`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada, Reset cada 24h y Sin "Jale"`));
