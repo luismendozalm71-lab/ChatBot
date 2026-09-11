@@ -11,6 +11,10 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
+// Modelo: Gemma 4 31B (flagship de la familia Gemma 4)
+// Si te da error 404, cambia a: 'gemini-3.5-flash-lite'
+const GEMINI_MODEL = 'gemma-4-31b-it';
+
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
 
 const MENSAJES_RECIENTES = 10;
@@ -111,13 +115,13 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- Llamada a Gemini ----------
+// ---------- Llamada a Gemini/Gemma ----------
 
 async function llamarGeminiConReintento(payload, intentos = 3) {
   for (let i = 0; i < intentos; i++) {
     try {
       const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent?key=${GEMINI_API_KEY}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
         payload
       );
       return response;
@@ -350,7 +354,7 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     parts: [{ text: mensajeUsuario }]
   });
 
-  // ⭐ Si falla la IA, respuestaTexto queda null y NO se contesta
+  // Si falla la IA, respuestaTexto queda null y NO se contesta
   let respuestaTexto = null;
 
   try {
@@ -394,7 +398,7 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     usuarioData.ultimaDespedida = hoy;
   }
 
-  // ⭐ Si no hubo respuesta de la IA, no contestamos NADA
+  // Si no hubo respuesta de la IA, no contestamos NADA
   if (!respuestaTexto) {
     console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
     return;
@@ -459,4 +463,4 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 // ---------- Arranque ----------
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con modelo ${GEMINI_MODEL}`));
