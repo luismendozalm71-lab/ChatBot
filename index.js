@@ -12,19 +12,16 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // ============================================================
-// CONFIGURACIÓN DE MODELOS EN CASCADA (Del más nuevo al más obsoleto)
+// CONFIGURACIÓN DE MODELOS EN CASCADA (Solo modelos Gemini 3.x)
+// Los modelos 2.5 y 2 ya no están disponibles para proyectos nuevos
 // ============================================================
 const MODELOS_GEMINI = [
-  'gemini-3.8-flash',
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-2-flash',
-  'gemini-2-flash-lite'
+  'gemini-3.8-flash',        // El más nuevo y potente
+  'gemini-3.7-flash',        // Generación 3.7
+  'gemini-3.6-flash',        // Generación 3.6
+  'gemini-3.5-flash',        // Generación 3.5
+  'gemini-3.1-flash-lite',   // Lite de generación 3.1 (500 RPD)
+  'gemini-3.5-flash-lite'    // Lite de generación 3.5 (500 RPD) - El más probable que funcione
 ];
 
 const ESPERA_CICLO_MS = 30 * 60 * 1000;
@@ -387,9 +384,7 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
 - ❌ PROHIBIDO en este bloque: café (es de noche).`;
   }
 
-  // ============================================================
-  // NUEVO: INSTRUCCIONES DE BEACONS Y PLATAFORMAS
-  // ============================================================
+  // Instrucciones de Beacons
   const instruccionesBeacons = `📢 INVITACIÓN A MIS PLATAFORMAS (¡MUY IMPORTANTE, ES TU OBJETIVO PRINCIPAL!):
 
 Tu meta principal es conseguir suscriptores para tus plataformas. Sigue esta estrategia de 3 fases:
@@ -572,7 +567,4 @@ Tú: "en mi beacons esta todo guapo: https://beacons.ai/nohami_05 ||| ahi me enc
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
 
       usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
-      usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
-
-      const mensajesSinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
-      if (mensajesSin
+      usuarioData.hist
