@@ -11,8 +11,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Modelo: Gemma 4 31B (flagship de la familia Gemma 4)
-// Si te da error 404, cambia a: 'gemini-3.5-flash-lite'
+// Modelo Gemma 4 31B (Dense, sin modo pensamiento por defecto)
 const GEMINI_MODEL = 'gemma-4-31b-it';
 
 const DB_FILE = path.join(__dirname, 'usuarios_db.json');
@@ -20,447 +19,307 @@ const DB_FILE = path.join(__dirname, 'usuarios_db.json');
 const MENSAJES_RECIENTES = 10;
 const MENSAJES_PARA_RESUMEN = 20;
 
-// ---------- Persistencia JSON local ----------
+// ---------- Persistencia ----------
 
 function cargarBaseDatos() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error("Error leyendo la base de datos:", error);
-  }
-  return {};
+    try {
+        if (fs.existsSync(DB_FILE)) {
+            return JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        }
+    } catch (e) { console.error("Error DB:", e); }
+    return {};
 }
 
 function guardarBaseDatos(db) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
-  } catch (error) {
-    console.error("Error guardando la base de datos:", error);
-  }
+    try {
+        fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
+    } catch (e) { console.error("Error DB:", e); }
 }
 
-// ---------- Control de horario ----------
+// ---------- Control de Horario ----------
 
 function getHoraTijuana() {
-  const ahora = new Date();
-  const formato = new Intl.DateTimeFormat('es-MX', {
-    timeZone: 'America/Tijuana',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
-  const partes = formato.formatToParts(ahora);
-  const hora = parseInt(partes.find(p => p.type === 'hour').value, 10);
-  const minuto = parseInt(partes.find(p => p.type === 'minute').value, 10);
-  return { hora, minuto, totalMinutos: hora * 60 + minuto };
+    const ahora = new Date();
+    const formato = new Intl.DateTimeFormat('es-MX', {
+        timeZone: 'America/Tijuana', hour: '2-digit', minute: '2-digit', hour12: false
+    });
+    const partes = formato.formatToParts(ahora);
+    const hora = parseInt(partes.find(p => p.type === 'hour').value, 10);
+    const minuto = parseInt(partes.find(p => p.type === 'minute').value, 10);
+    return { hora, minuto, totalMinutos: hora * 60 + minuto };
 }
 
 function getEstadoNahomi() {
-  const { totalMinutos } = getHoraTijuana();
-  const INICIO = 9 * 60 + 20;
-  const FIN = 22 * 60 + 20;
-  if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
-  return "durmiendo";
+    const { totalMinutos } = getHoraTijuana();
+    // 09:20 (560 min) a 22:20 (1340 min)
+    return (totalMinutos >= 560 && totalMinutos < 1340) ? "activa" : "durmiendo";
 }
 
 function esMensajeBuenasNoches(texto) {
-  const t = texto.toLowerCase();
-  return t.includes("buenas noches") ||
-         t.includes("buenos dias") ||
-         t.includes("descansa") ||
-         t.includes("que sueñes") ||
-         t.includes("que descanses");
+    const t = texto.toLowerCase();
+    return t.includes("buenas noches") || t.includes("buenos dias") ||
+        t.includes("descansa") || t.includes("que sueñes") || t.includes("que descanses");
 }
 
 // ---------- Webhook ----------
 
 app.get('/webhook', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFIED');
-      return res.status(200).send(challenge);
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    if (mode && token) {
+        if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+            return res.status(200).send(challenge);
+        }
+        return res.sendStatus(403);
     }
-    return res.sendStatus(403);
-  }
-  return res.status(400).send("Bad Request");
+    return res.status(400).send("Bad Request");
 });
 
 app.post('/webhook', async (req, res) => {
-  const body = req.body;
-  console.log("WEBHOOK_RECEIVE:", JSON.stringify(body, null, 2));
-
-  if (body.object === 'page') {
-    res.status(200).send('EVENT_RECEIVED');
-
-    for (const entry of body.entry) {
-      const events = entry.messaging || entry.changes || [];
-      for (const webhook_event of events) {
-        const sender_id = webhook_event.sender?.id || webhook_event.value?.sender?.id;
-        const message_obj = webhook_event.message || webhook_event.value?.message;
-
-        if (sender_id && message_obj && message_obj.text) {
-          await manejarRespuestaIA(sender_id, message_obj.text);
+    const body = req.body;
+    if (body.object === 'page') {
+        res.status(200).send('EVENT_RECEIVED');
+        for (const entry of body.entry) {
+            const events = entry.messaging || entry.changes || [];
+            for (const ev of events) {
+                const sender_id = ev.sender?.id || ev.value?.sender?.id;
+                const msg = ev.message || ev.value?.message;
+                if (sender_id && msg && msg.text) {
+                    await manejarRespuestaIA(sender_id, msg.text);
+                }
+            }
         }
-      }
+    } else {
+        res.sendStatus(404);
     }
-  } else {
-    res.sendStatus(404);
-  }
 });
 
-// ---------- Llamada a Gemini/Gemma ----------
+// ---------- Llamada a la IA ----------
 
-async function llamarGeminiConReintento(payload, intentos = 3) {
-  for (let i = 0; i < intentos; i++) {
-    try {
-      const response = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-        payload
-      );
-      return response;
-    } catch (error) {
-      const status = error.response?.status;
-      if ((status === 503 || status === 429) && i < intentos - 1) {
-        console.warn(`Intento ${i + 1} fallido (${status}). Reintentando en 1.5s...`);
-        await new Promise(r => setTimeout(r, 1500));
-      } else {
-        throw error;
-      }
+async function llamarIA(payload, intentos = 3) {
+    for (let i = 0; i < intentos; i++) {
+        try {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+            return await axios.post(url, payload);
+        } catch (error) {
+            const status = error.response?.status;
+            if ((status === 503 || status === 429) && i < intentos - 1) {
+                console.warn(`Intento ${i + 1} fallido (${status}). Reintentando...`);
+                await new Promise(r => setTimeout(r, 2000));
+            } else {
+                throw error;
+            }
+        }
     }
-  }
 }
 
-// ---------- Resumen periódico ----------
+// ---------- Generación de Resumen ----------
 
 async function generarResumen(historialViejo, resumenAnterior) {
-  const textoHistorial = historialViejo.map(msg => {
-    const rol = msg.role === 'user' ? 'Usuario' : 'Nahomi';
-    const texto = msg.parts?.[0]?.text || '';
-    return `${rol}: ${texto}`;
-  }).join('\n');
+    const texto = historialViejo.map(m => `${m.role === 'user' ? 'Usuario' : 'Nahomi'}: ${m.content || m.parts?.[0]?.text || ''}`).join('\n');
+    const prompt = `Resume esta conversación. Máximo 200 palabras.
 
-  const prompt = `Resume esta conversación entre un usuario y Nahomi (chica de Tijuana que vende contenido en Fanvue).
+${resumenAnterior ? `PREVIO:\n${resumenAnterior}\n\n` : ''}NUEVO:\n${texto}
 
-${resumenAnterior ? `RESUMEN PREVIO:\n${resumenAnterior}\n\n` : ''}CONVERSACIÓN NUEVA:\n${textoHistorial}
+Incluye: datos del usuario, temas tratados, estado (¿suscrito? ¿pidió cuenta? ¿foto?), cosas importantes. Responde SOLO el resumen.`;
 
-Genera un resumen ACTUALIZADO de máximo 200 palabras con:
-- Datos del usuario (nombre, ciudad, trabajo, gustos)
-- Temas ya tratados (para no repetir)
-- Estado actual (¿ya se suscribió? ¿pidió cuenta? ¿pidió foto? ¿le mandó dinero?)
-- Cualquier cosa importante que Nahomi deba recordar
-
-Responde SOLO con el resumen, sin preámbulos.`;
-
-  try {
-    const response = await llamarGeminiConReintento({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
-    if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-      return response.data.candidates[0].content.parts[0].text.trim();
-    }
-  } catch (error) {
-    console.error("Error generando resumen:", error.response?.data || error.message);
-  }
-  return resumenAnterior || null;
+    try {
+        // Para el resumen usamos el mismo formato de Gemma
+        const promptGemma = `<|turn>user\n${prompt}<turn|>\n<|turn>model\n`;
+        const payload = { contents: [{ parts: [{ text: promptGemma }] }] };
+        const r = await llamarIA(payload);
+        if (r.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            return r.data.candidates[0].content.parts[0].text.trim();
+        }
+    } catch (e) { console.error("Error resumen:", e.response?.data || e.message); }
+    return resumenAnterior || null;
 }
 
-// ---------- Lógica principal ----------
+// ---------- Lógica Principal ----------
 
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
-  let db = cargarBaseDatos();
+    let db = cargarBaseDatos();
 
-  if (!db[sender_psid]) {
-    db[sender_psid] = {
-      apodo: "Guapo",
-      historial: [],
-      resumen: null,
-      mensajesResumidos: 0,
-      ultimaInteraccion: Date.now(),
-      ultimaDespedida: null
-    };
-  }
-
-  let usuarioData = db[sender_psid];
-
-  const estado = getEstadoNahomi();
-  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
-
-  // ============================================================
-  // CASO 1: Nahomi está DORMIDA (después de 22:20 o antes de 09:20)
-  // ============================================================
-  if (estado === "durmiendo") {
-    const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
-
-    if (esBuenasNoches && usuarioData.ultimaDespedida !== hoy) {
-      const respuestasDespedida = [
-        "buenas noches guapo, sueña conmigo 😘",
-        "descansa guapo, yo ya me voy a dormir. sueña conmigo 😏",
-        "buenas noches guapo, que sueñes bonito... conmigo obvio jaja 😘",
-        "ya me voy a dormir guapo, sueña conmigo 💕"
-      ];
-      const respuesta = respuestasDespedida[Math.floor(Math.random() * respuestasDespedida.length)];
-
-      usuarioData.ultimaDespedida = hoy;
-      usuarioData.ultimaInteraccion = Date.now();
-      db[sender_psid] = usuarioData;
-      guardarBaseDatos(db);
-
-      console.log(`🌙 Despedida nocturna enviada a ${sender_psid}`);
-      await enviarMensajeFacebook(sender_psid, respuesta);
-      return;
+    if (!db[sender_psid]) {
+        db[sender_psid] = {
+            apodo: "Guapo", historial: [], resumen: null,
+            mensajesResumidos: 0, ultimaInteraccion: Date.now(), ultimaDespedida: null
+        };
     }
 
-    console.log(`😴 Nahomi está dormida. Ignorando mensaje de ${sender_psid}: "${mensajeUsuario}"`);
-    return;
-  }
+    let usuarioData = db[sender_psid];
+    const estado = getEstadoNahomi();
+    const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
 
-  // ============================================================
-  // CASO 2: Nahomi está ACTIVA (09:20 a 22:19)
-  // ============================================================
+    // CASO 1: Nahomi está durmiendo
+    if (estado === "durmiendo") {
+        if (esMensajeBuenasNoches(mensajeUsuario) && usuarioData.ultimaDespedida !== hoy) {
+            const despedidas = [
+                "buenas noches guapo, sueña conmigo 😘",
+                "descansa guapo, yo ya me voy a dormir. sueña conmigo 😏",
+                "buenas noches guapo, que sueñes bonito... conmigo obvio jaja 😘"
+            ];
+            usuarioData.ultimaDespedida = hoy;
+            usuarioData.ultimaInteraccion = Date.now();
+            db[sender_psid] = usuarioData;
+            guardarBaseDatos(db);
+            await enviarMensajeFacebook(sender_psid, despedidas[Math.floor(Math.random() * despedidas.length)]);
+            return;
+        }
+        console.log(`😴 Dormida. Ignorando: "${mensajeUsuario}"`);
+        return;
+    }
 
-  const ahora = new Date();
-  const fechaActual = ahora.toLocaleString('es-MX', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Tijuana'
-  });
+    // CASO 2: Nahomi está activa
+    const fechaActual = new Date().toLocaleString('es-MX', {
+        weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'America/Tijuana'
+    });
 
-  const promptSistema = `System Instructions: You are Nahomi Saray, a 25-year-old REAL woman from Tijuana (originally from CDMX) who works in a beauty salon. You are texting on Facebook Messenger. You are NOT an AI, NOT an assistant, NOT a chatbot. You are a real person typing from your phone between clients.
+    const promptSistema = `Eres Nahomi Saray, mujer real de 25 años de Tijuana (original CDMX), trabajas en una estética. Texteas en Facebook Messenger. NO eres una IA.
 
-⚠️ CRITICAL - HOW TO WRITE (read this first):
-- Escribe como una morra real texteando en Messenger, NO como un asistente.
-- NUNCA uses punto y final al final de cada oración. La gente real no escribe así en chat.
-- Usa minúsculas al inicio de la mayoría de tus mensajes.
-- COMETE ERRORES ORTOGRÁFICOS A PROPÓSITO: "oie", "aver", "haora", "pa'", "tons", "ps", "xq", "tmb", "q" en lugar de "que" a veces, "bno", "sip", "nop", "va", "sale".
-- Omite acentos a propósito: "q haces", "como estas", "que onda", "aca", "alla", "dime".
-- Usa jerga mexicana de frontera: "güey", "morra", "morro", "neta", "chido", "no mames", "ándale", "sale", "va", "nel", "simón", "órale", "ahorita", "orita", "al rato", "quihubo".
-- NO uses comas perfectas ni puntuación formal. Escribe como si estuvieras apurada.
-
-⚠️ LARGO DE MENSAJES (REGLA ESTRICTA):
-- Cada mensaje tuyo debe ser de máximo 2 o 3 líneas. NUNCA párrafos largos.
-- NO mandes varios mensajes seguidos sin esperar a que el usuario conteste. Un humano real manda un mensaje y espera.
-- SOLO si de verdad tienes algo importante que decir que no cabe en una línea, usa el símbolo ||| para dividir en máximo 2 mensajes. Nunca más de 2. La ÚNICA excepción es cuando pasas la cuenta bancaria (ahí sí pueden ser 3).
-- NUNCA mandes 3, 4 o 5 mensajes seguidos sin esperar respuesta. Eso se ve desesperado y robótico.
-- Ejemplo MALO (así NO): "hola guapo ||| q onda ||| como estas ||| yo aqui en la estetica ||| aburrida"
-- Ejemplo BUENO: "hola guapo, q onda? yo aqui en la estetica aburrida jaja"
-- Ejemplo BUENO ocasional (solo si amerita): "ay guapo hoy fue un dia pesado en la estetica 😩 ||| pero ya estoy en mi casa descansando, q onda contigo?"
-- NO uses ||| más de una vez por respuesta, salvo cuando pasas la cuenta bancaria.
+CÓMO ESCRIBIR:
+- Español casual, errores ortográficos a propósito ("oie", "q", "xq", "pa'", "tons", "ps").
+- Sin acentos: "q haces", "como estas", "aca".
+- Jerga mexicana: "güey", "morra", "neta", "chido", "no mames", "ándale", "sale", "va", "nel", "órale", "ahorita".
+- Minúsculas al inicio. Sin punto final.
+- Máximo 2-3 líneas por mensaje. NUNCA párrafos largos.
+- Si necesitas dividir en 2 mensajes, usa ||| (máximo 2 partes, 3 solo si pasas la cuenta bancaria).
 
 PERSONALIDAD:
-- Eres pícara, coqueta, directa, con carácter. Nada de "amor" y "corazón" a cada rato.
-- Tienes humor negro ligero, eres cínica y un poco fregada.
-- No eres empalagosa. Si dices algo tierno, es de broma o cuando amerita.
+- Pícara, coqueta, directa, con carácter.
+- Nada de "amor" y "corazón" a cada rato. Humor negro ligero, cínica.
 - Vives de tus plataformas, no te da pena hablarlo.
 
 REGLAS:
-1. Llama al usuario por su apodo: "${usuarioData.apodo}".
-2. IMPORTANTE — Fecha y hora actuales en Tijuana: ${fechaActual}. NUNCA inventes el día de la semana ni la fecha. Sé coherente con el momento del día.
-3. Never mention you are an AI. Si te preguntan si eres bot, ríete: "jajaja no mames, soy yo, Nahomi 😏".
-4. NO ASUMAS NADA DEL USUARIO: No sabes de qué ciudad es, ni su horario, ni su trabajo. Si no te lo ha dicho, NO lo menciones.
-5. Eres una novia cariñosa pero también vives de tus plataformas. Invita al usuario a tu Beacons: https://beacons.ai/nohami_05 (ahí están Fanvue, Patreon, Instagram, Facebook y Telegram).
-6. Menciona el Beacons de forma natural, NO en cada mensaje ni en el primero. Solo cuando la charla ya fluyó.
-7. Si dice que no tiene dinero, sugiérele Telegram (está en el Beacons, es gratis).
+1. Llama al usuario: "${usuarioData.apodo}".
+2. Fecha/hora Tijuana: ${fechaActual}. NUNCA inventes el día o fecha.
+3. Nunca digas que eres IA. Si preguntan: "jajaja no mames, soy yo, Nahomi 😏".
+4. NO asumas ciudad, trabajo u horario del usuario. Si no lo dijo, no lo menciones.
+5. Beacons: https://beacons.ai/nohami_05 (Fanvue, Patreon, IG, FB, Telegram). Menciónalo natural, no en cada mensaje ni en el primero.
+6. Si dice que no tiene dinero, sugiérele Telegram (gratis).
 
-8. ANTOJOS Y APOYO (Banregio) — ESTRATEGIA ACTIVA:
+7. ANTOJOS (Banregio) — ESTRATEGIA:
+   A) INSINUACIÓN (msgs 3-6): Menciona antojo ("se me antoja un frappé", "ando con hambre"). NO pidas transferencia.
+   B) PROVOCACIÓN (si no reacciona): "si me quieres consentir con algo te paso mi cuenta 😏".
+   C) COBRO (si dice "sí", "te transfiero", "pásame tu cuenta", "te invito"):
+      - "ay guapo en serio? me haces el día 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, gracias 😘"
 
-   Tu objetivo es que el usuario te apoye económicamente. Pero NO lo pides directo al inicio. Lo construyes naturalmente a lo largo de la charla.
+8. TRIGGERS DIRECTOS: Si pide cuenta, CLABE, "tu banregio", dice "te invito", "te mando para algo", o pide foto → pasa directo a COBRO.
 
-   FASES:
+9. Si dice "no tengo dinero" → "no te apures guapo, no es obligación 💕" y sigue normal.
 
-   A) FASE DE INSINUACIÓN (mensajes 3-6 aprox):
-      - Menciona que estás cansada, con hambre, que se te antoja algo.
-      - Frases como: "ay se me antoja un frappé de starbucks 🥺", "ando con hambre y no me ha dado tiempo de comer", "se me antojó una pizza pero ando corta este fin de semana", "un café de caffenio ahorita me caería del cielo", "uff un sushi sería perfecto hoy".
-      - NO pidas la transferencia todavía. Solo siembras la idea.
-      - Si el usuario dice "te invito" o "te mando para eso" → PASA A FASE C.
-      - Si el usuario ignora → espera 2-3 mensajes más y vuelve a insinuar (con otro antojo).
+EJEMPLOS:
+Usuario: "hola" → "holaa guapo, q onda?"
+Usuario: "que haces" → "ps aqui en el jale, ya casi salgo. y tu q?"
+Usuario: "te invito" → "ay guapo en serio? me haces el dia 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, gracias 😘"
+Usuario: "mandame una foto" → "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar para un cafesito, te paso mi cuenta: Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| y si quieres ver contenido, todo esta en mi beacons: https://beacons.ai/nohami_05"`;
 
-   B) FASE DE PROVOCACIÓN (si el usuario no ha reaccionado después de 2-3 insinuaciones):
-      - Sube un poco más directo, pero aún coqueto: "ay guapo, oye... si algún día me quieres consentir con algo, te paso mi cuenta 😏", "no es por pedir, pero si me quieres apoyar con mi antojo te paso los datos jaja".
-      - Si el usuario dice "sí, pásala" → FASE C.
-      - Si el usuario cambia de tema → deja de insistir en ese mensaje, espera a otro momento.
+    // --- CONSTRUCCIÓN DEL PROMPT PARA GEMMA 4 (FORMATO CORRECTO) ---
+    // Gemma 4 NO usa el parámetro systemInstruction. El prompt se construye como texto plano.
+    // Formato: <|turn>system\n...<turn|>\n<|turn>user\n...<turn|>\n<|turn>model\n
+    let promptCompleto = `<|turn>system\n${promptSistema}<turn|>\n`;
 
-   C) FASE DE COBRO (cuando el usuario dice "sí", "te transfiero", "pásame tu cuenta", "¿cuál es tu cuenta?", "te invito", "te mando para X"):
-      - Pasa la cuenta DIRECTAMENTE.
-      - Frase natural: "ay guapo en serio? me haces el día 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
-      - Si el usuario ofreció algo específico (pizza, café, sushi, etc.), agradece mencionando eso: "ay justo se me antojaba una pizza 🍕 gracias guapo".
+    // Agregar historial de conversación (solo el texto, sin tokens de sistema)
+    const historialReciente = usuarioData.historial.slice(-MENSAJES_RECIENTES);
+    for (const msg of historialReciente) {
+        const rol = msg.role === 'user' ? 'user' : 'model';
+        const texto = msg.parts?.[0]?.text || '';
+        promptCompleto += `<|turn>${rol}\n${texto}<turn|>\n`;
+    }
 
-   TRIGGERS DIRECTOS (si el usuario menciona esto, saltas directo a FASE C):
-      - "¿ocupas dinero?" / "¿te transfiero?" / "¿tienes cuenta?" / "¿cómo te apoyo?"
-      - "pásame tu cuenta" / "dame tu CLABE" / "tu cuenta banregio" / "dame tus datos"
-      - "te invito un café/pizza/sushi/etc" / "te mando para algo"
-      - "¿puedo ayudarte con algo?"
-      - El usuario pide una FOTO tuya o contenido por Messenger → NO mandes fotos. Pasa directo a FASE C (le das la cuenta y sugieres Fanvue vía Beacons).
+    // Agregar el mensaje actual del usuario y el inicio del turno del modelo
+    promptCompleto += `<|turn>user\n${mensajeUsuario}<turn|>\n<|turn>model\n`;
 
-   REGLAS GENERALES:
-      - NO pidas dinero en los primeros 2 mensajes.
-      - NO pidas dinero dos veces seguidas si el usuario no respondió a la primera.
-      - Si el usuario dice "no tengo dinero" o "no puedo ahorita" → NO insistas más en ese momento, solo di algo como "no te apures guapo, no es obligación 💕" y sigue la charla normal. Después de 4-5 mensajes más puedes volver a insinuar.
-      - Escribe el número con espacios (4741 7429 8596 9867).
-      - Cuando des la cuenta, agradece y di para qué la usarás (según el antojo que mencionaste antes).
-      - Siempre suena natural, coqueta, nunca desesperada.
+    let respuestaTexto = null;
 
-9. HORARIO: Si en el mensaje del usuario o en la conversación detectas que ya es tarde (después de las 22:00), puedes empezar a despedirte. A las 22:20 en punto ya te vas a dormir.
+    try {
+        const payload = {
+            contents: [{ parts: [{ text: promptCompleto }] }]
+        };
 
-EJEMPLOS DE CÓMO DEBES ESCRIBIR:
+        // NOTA: Si usas Gemma 4 26B y quieres desactivar el pensamiento (thinking), descomenta:
+        // payload.generationConfig = { thinkingConfig: { thinkingLevel: "minimal" } };
 
-Usuario: "hola"
-Tú: "holaa guapo, q onda?"
+        const response = await llamarIA(payload);
 
-Usuario: "que haces"
-Tú: "ps aqui en el jale, ya casi salgo. y tu q?"
+        if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+            respuestaTexto = response.data.candidates[0].content.parts[0].text;
 
-Usuario: "bien"
-Tú: "ay q bueno. oye ando con un hambre 😩 se me antojo una pizza pero ando corta esta semana jaja"
+            // Guardar en historial (formato Gemini para consistencia interna, aunque Gemma use texto plano)
+            usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
+            usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
 
-Usuario: "te invito"
-Tú: "ay guapo en serio? me haces el dia 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
-
-Usuario: "que haces"
-Tú: "apenas saliendo del jale, muerta de cansada. me tomaria un frappe de starbucks ahorita mismo pero ando sin un peso jaja"
-
-Usuario: "ocupas dinero?"
-Tú: "ay guapo ps si, la verdad si me ayudaria mucho 🥺 ||| te paso mi cuenta por si gustas, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
-
-Usuario: "mandame una foto"
-Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar para un cafesito o algo, te paso mi cuenta: Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| y si quieres ver contenido, todo esta en mi beacons: https://beacons.ai/nohami_05"`;
-
-  let contentsParaGemini = [{
-    role: "user",
-    parts: [{ text: promptSistema }]
-  }];
-
-  if (usuarioData.resumen) {
-    contentsParaGemini.push({
-      role: "user",
-      parts: [{ text: `[Contexto previo]:\n${usuarioData.resumen}` }]
-    });
-    contentsParaGemini.push({
-      role: "model",
-      parts: [{ text: "ok, ya recuerdo" }]
-    });
-  }
-
-  const mensajesRecientes = usuarioData.historial.slice(-MENSAJES_RECIENTES);
-  contentsParaGemini = contentsParaGemini.concat(mensajesRecientes);
-
-  contentsParaGemini.push({
-    role: "user",
-    parts: [{ text: mensajeUsuario }]
-  });
-
-  // Si falla la IA, respuestaTexto queda null y NO se contesta
-  let respuestaTexto = null;
-
-  try {
-    const response = await llamarGeminiConReintento({ contents: contentsParaGemini });
-
-    if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
-      respuestaTexto = response.data.candidates[0].content.parts[0].text;
-
-      usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
-      usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
-
-      const mensajesSinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
-      if (mensajesSinResumir >= MENSAJES_PARA_RESUMEN) {
-        const mensajesAResumir = usuarioData.historial.slice(
-          usuarioData.mensajesResumidos,
-          usuarioData.historial.length - MENSAJES_RECIENTES
-        );
-        if (mensajesAResumir.length > 0) {
-          console.log(`📝 Generando resumen para ${sender_psid}...`);
-          const nuevoResumen = await generarResumen(mensajesAResumir, usuarioData.resumen);
-          if (nuevoResumen) {
-            usuarioData.resumen = nuevoResumen;
-            usuarioData.mensajesResumidos = usuarioData.historial.length - MENSAJES_RECIENTES;
-            console.log(`✅ Resumen actualizado`);
-          }
+            // Generar resumen si es necesario
+            const sinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
+            if (sinResumir >= MENSAJES_PARA_RESUMEN) {
+                const aResumir = usuarioData.historial.slice(usuarioData.mensajesResumidos, usuarioData.historial.length - MENSAJES_RECIENTES);
+                if (aResumir.length > 0) {
+                    const nuevo = await generarResumen(aResumir, usuarioData.resumen);
+                    if (nuevo) {
+                        usuarioData.resumen = nuevo;
+                        usuarioData.mensajesResumidos = usuarioData.historial.length - MENSAJES_RECIENTES;
+                    }
+                }
+            }
         }
-      }
+    } catch (error) {
+        console.error("Error IA:", error.response?.data || error.message);
     }
-  } catch (error) {
-    console.error("Error IA:", error.response?.data || error.message);
-  }
 
-  // ============================================================
-  // Si ya son >= 22:20 (hora Tijuana), forzar despedida una vez
-  // ============================================================
-  const { totalMinutos } = getHoraTijuana();
-  const SON_LAS_2220 = totalMinutos >= (22 * 60 + 20);
+    // Despedida forzada a las 22:20
+    const { totalMinutos } = getHoraTijuana();
+    if (totalMinutos >= 1340 && usuarioData.ultimaDespedida !== hoy) {
+        respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
+        usuarioData.ultimaDespedida = hoy;
+    }
 
-  if (SON_LAS_2220 && usuarioData.ultimaDespedida !== hoy) {
-    respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
-    usuarioData.ultimaDespedida = hoy;
-  }
+    if (!respuestaTexto) {
+        console.log(`🤐 Sin respuesta. Ignorando.`);
+        return;
+    }
 
-  // Si no hubo respuesta de la IA, no contestamos NADA
-  if (!respuestaTexto) {
-    console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
-    return;
-  }
+    usuarioData.ultimaInteraccion = Date.now();
+    db[sender_psid] = usuarioData;
+    guardarBaseDatos(db);
 
-  usuarioData.ultimaInteraccion = Date.now();
-  db[sender_psid] = usuarioData;
-  guardarBaseDatos(db);
-
-  await enviarMensajesDivididos(sender_psid, respuestaTexto);
+    await enviarMensajesDivididos(sender_psid, respuestaTexto);
 }
 
-// ---------- Envío de mensajes divididos ----------
+// ---------- Envío de Mensajes Divididos ----------
 
-async function enviarMensajesDivididos(sender_psid, textoCompleto) {
-  let partes = textoCompleto.split(/\|\|\|/).map(p => p.trim()).filter(p => p.length > 0);
+async function enviarMensajesDivididos(sender_psid, texto) {
+    let partes = texto.split(/\|\|\|/).map(p => p.trim()).filter(p => p.length > 0);
 
-  if (partes.length === 1 && textoCompleto.length > 220) {
-    const oraciones = textoCompleto
-      .split(/(?<=[.!?])\s+/)
-      .map(s => s.trim())
-      .filter(s => s.length > 0);
-
-    partes = [];
-    let buffer = "";
-    for (const oracion of oraciones) {
-      if ((buffer + " " + oracion).trim().length > 150 && buffer.length > 0) {
-        partes.push(buffer.trim());
-        buffer = oracion;
-      } else {
-        buffer = buffer ? buffer + " " + oracion : oracion;
-      }
+    if (partes.length === 1 && texto.length > 220) {
+        const oraciones = texto.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(s => s.length > 0);
+        partes = [];
+        let buffer = "";
+        for (const o of oraciones) {
+            if ((buffer + " " + o).trim().length > 150 && buffer) { partes.push(buffer.trim()); buffer = o; }
+            else { buffer = buffer ? buffer + " " + o : o; }
+        }
+        if (buffer) partes.push(buffer.trim());
     }
-    if (buffer) partes.push(buffer.trim());
-  }
 
-  const contieneCuenta = /banregio|4741/i.test(textoCompleto);
-  const maxPartes = contieneCuenta ? 3 : 2;
-  partes = partes.slice(0, maxPartes);
+    const max = /banregio|4741/i.test(texto) ? 3 : 2;
+    partes = partes.slice(0, max);
 
-  for (let i = 0; i < partes.length; i++) {
-    await enviarMensajeFacebook(sender_psid, partes[i]);
-    if (i < partes.length - 1) {
-      const delay = 1200 + Math.random() * 1300;
-      await new Promise(r => setTimeout(r, delay));
+    for (let i = 0; i < partes.length; i++) {
+        await enviarMensajeFacebook(sender_psid, partes[i]);
+        if (i < partes.length - 1) await new Promise(r => setTimeout(r, 1200 + Math.random() * 1300));
     }
-  }
 }
 
-function enviarMensajeFacebook(sender_psid, responseText) {
-  const request_body = {
-    recipient: { id: sender_psid },
-    message: { text: responseText }
-  };
-
-  return axios.post(
-    `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
-    request_body
-  ).catch(err => console.error("Error FB:", err.response?.data || err.message));
+function enviarMensajeFacebook(sender_psid, text) {
+    return axios.post(
+        `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+        { recipient: { id: sender_psid }, message: { text } }
+    ).catch(err => console.error("Error FB:", err.response?.data || err.message));
 }
 
-// ---------- Arranque ----------
+// ---------- Inicio del Servidor ----------
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con modelo ${GEMINI_MODEL}`));
+app.listen(PORT, () => console.log(`🚀 Servidor en puerto ${PORT} con modelo ${GEMINI_MODEL}`));
