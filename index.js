@@ -15,28 +15,27 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 // CONFIGURACIÓN DE MODELOS EN CASCADA (Del más nuevo al más obsoleto)
 // ============================================================
 const MODELOS_GEMINI = [
-  'gemini-3.8-flash',        // El más nuevo (mejor calidad)
-  'gemini-3.7-flash',
-  'gemini-3.6-flash',
-  'gemini-3.5-flash',
-  'gemini-3-flash-preview',
-  'gemini-3.1-flash-lite',
-  'gemini-3.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
-  'gemini-2-flash',          // Ilimitado (nunca da 429)
-  'gemini-2-flash-lite'      // Ilimitado (nunca da 429)
+  'gemini-3.8-flash',        // 25/20 RPD (agotado)
+  'gemini-3.7-flash',        // 23/20 RPD (agotado)
+  'gemini-3.6-flash',        // 24/20 RPD (agotado)
+  'gemini-3.5-flash',        // 20/20 RPD (agotado)
+  'gemini-3.1-flash-lite',   // 508/500 RPD (casi agotado)
+  'gemini-3.5-flash-lite',   // 53/500 RPD (¡MUCHA CUOTA DISPONIBLE!)
+  'gemini-2.5-flash',        // 0/20 RPD
+  'gemini-2.5-flash-lite',   // 0/20 RPD
+  'gemini-2-flash',          // Ilimitado
+  'gemini-2-flash-lite'      // Ilimitado
 ];
 
 const ESPERA_CICLO_MS = 30 * 60 * 1000;         // 30 min si se agotan todos
 const RESET_CICLO_MS = 24 * 60 * 60 * 1000;     // 24 horas para reiniciar desde el mejor modelo
+const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;   // 30 min para reintentar modelos superiores
 
 // ============================================================
-// ARCHIVO DE ESTADO PERSISTENTE (para sobrevivir reinicios de Render)
+// ARCHIVO DE ESTADO PERSISTENTE
 // ============================================================
 const ESTADO_FILE = path.join(__dirname, 'estado_modelos.json');
 
-// Cargamos el estado desde disco (si existe)
 function cargarEstado() {
   try {
     if (fs.existsSync(ESTADO_FILE)) {
@@ -48,14 +47,14 @@ function cargarEstado() {
   } catch (error) {
     console.error("Error leyendo estado_modelos.json:", error);
   }
-  // Si no existe, devolvemos el estado por defecto
   return {
     indiceUltimoModeloExitoso: 0,
-    ultimoReinicioCiclo: Date.now()
+    ultimoReinicioCiclo: Date.now(),
+    ultimoIntentoSuperior: Date.now(),
+    modelosAgotadosHoy: [] // NUEVO: lista de modelos agotados por hoy
   };
 }
 
-// Guardamos el estado en disco
 function guardarEstado(estado) {
   try {
     fs.writeFileSync(ESTADO_FILE, JSON.stringify(estado, null, 2), 'utf8');
@@ -64,8 +63,12 @@ function guardarEstado(estado) {
   }
 }
 
-// Cargamos el estado al arrancar el servidor
 let estadoPersistente = cargarEstado();
+
+// Aseguramos que exista el campo
+if (!estadoPersistente.modelosAgotadosHoy) {
+  estadoPersistente.modelosAgotadosHoy = [];
+}
 
 // ============================================================
 // FUNCIÓN PARA VERIFICAR SI DEBEMOS REINICIAR EL CICLO (24 HORAS)
@@ -75,6 +78,24 @@ function debeReiniciarCiclo() {
   if (ahora - estadoPersistente.ultimoReinicioCiclo >= RESET_CICLO_MS) {
     console.log(`🔄 Han pasado 24 horas. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
     estadoPersistente.ultimoReinicioCiclo = ahora;
+    estadoPersistente.indiceUltimoModeloExitoso = 0;
+    estadoPersistente.ultimoIntentoSuperior = ahora;
+    estadoPersistente.modelosAgotadosHoy = []; // Reseteamos la lista de agotados
+    guardarEstado(estadoPersistente);
+    return true;
+  }
+  return false;
+}
+
+// ============================================================
+// FUNCIÓN PARA VERIFICAR SI DEBEMOS REINTENTAR MODELOS SUPERIORES (30 MIN)
+// ============================================================
+function debeReintentarSuperiores() {
+  const ahora = Date.now();
+  if (ahora - estadoPersistente.ultimoIntentoSuperior >= REINTENTO_SUPERIOR_MS) {
+    console.log(`🔄 Han pasado 30 min. Reintentando desde el modelo más alto disponible...`);
+    estadoPersistente.ultimoIntentoSuperior = ahora;
+    // NO reseteamos los agotados, pero sí intentamos desde el principio
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     guardarEstado(estadoPersistente);
     return true;
@@ -127,8 +148,8 @@ function getHoraTijuana() {
 
 function getEstadoNahomi() {
   const { totalMinutos } = getHoraTijuana();
-  const INICIO = 9 * 60 + 0;    // 09:00 AM
-  const FIN = 22 * 60 + 20;     // 22:20 (10:20 PM)
+  const INICIO = 9 * 60 + 0;
+  const FIN = 22 * 60 + 20;
   
   if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
   return "durmiendo";
@@ -190,6 +211,11 @@ async function llamarGeminiConReintento(payload) {
   if (debeReiniciarCiclo()) {
     console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
   }
+  
+  // Verificamos si debemos reintentar modelos superiores (cada 30 min)
+  if (debeReintentarSuperiores()) {
+    console.log(`🔄 Reintentando desde el modelo más alto disponible...`);
+  }
 
   // Empezamos desde el último modelo exitoso guardado en disco
   let indiceInicio = estadoPersistente.indiceUltimoModeloExitoso;
@@ -197,6 +223,12 @@ async function llamarGeminiConReintento(payload) {
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
+    
+    // Si el modelo ya está marcado como agotado hoy, lo saltamos
+    if (estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
+      console.log(`⏭️ Modelo ${modeloActual} marcado como agotado hoy. Saltando...`);
+      continue;
+    }
     
     try {
       console.log(`🤖 Intentando con modelo: ${modeloActual}`);
@@ -217,8 +249,12 @@ async function llamarGeminiConReintento(payload) {
       const status = error.response?.status;
       
       if (status === 429 || status === 503) {
-        console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Saltando al siguiente...`);
-        // Si este modelo falló, el siguiente intento empezará desde el siguiente índice
+        console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Marcándolo como agotado hoy...`);
+        // Lo marcamos como agotado para no volver a intentarlo
+        if (!estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
+          estadoPersistente.modelosAgotadosHoy.push(modeloActual);
+        }
+        // Avanzamos al siguiente modelo
         estadoPersistente.indiceUltimoModeloExitoso = i + 1;
         guardarEstado(estadoPersistente);
         continue;
@@ -234,7 +270,9 @@ async function llamarGeminiConReintento(payload) {
   
   // Reiniciamos el ciclo desde el principio
   estadoPersistente.ultimoReinicioCiclo = Date.now();
+  estadoPersistente.ultimoIntentoSuperior = Date.now();
   estadoPersistente.indiceUltimoModeloExitoso = 0;
+  estadoPersistente.modelosAgotadosHoy = [];
   guardarEstado(estadoPersistente);
   console.log(`🔄 Reintentando ciclo completo desde ${MODELOS_GEMINI[0]}...`);
   return llamarGeminiConReintento(payload);
@@ -296,7 +334,7 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
 
   // ============================================================
-  // CASO 1: Nahomi está DORMIDA (después de 22:20 o antes de 09:00)
+  // CASO 1: Nahomi está DORMIDA
   // ============================================================
   if (estado === "durmiendo") {
     const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
@@ -325,7 +363,7 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   }
 
   // ============================================================
-  // CASO 2: Nahomi está ACTIVA (09:00 a 22:19)
+  // CASO 2: Nahomi está ACTIVA
   // ============================================================
 
   const ahora = new Date();
@@ -457,7 +495,6 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     parts: [{ text: mensajeUsuario }]
   });
 
-  // Si falla la IA, respuestaTexto queda null y NO se contesta
   let respuestaTexto = null;
 
   try {
@@ -490,9 +527,6 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     console.error("Error IA:", error.response?.data || error.message);
   }
 
-  // ============================================================
-  // Si ya son >= 22:20 (hora Tijuana), forzar despedida una vez
-  // ============================================================
   const { totalMinutos } = getHoraTijuana();
   const SON_LAS_2220 = totalMinutos >= (22 * 60 + 20);
 
@@ -501,18 +535,13 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     usuarioData.ultimaDespedida = hoy;
   }
 
-  // Si no hubo respuesta de la IA, no contestamos NADA
   if (!respuestaTexto) {
     console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
     return;
   }
 
-  // ============================================================
-  // DELAY HUMANO: Esperamos un poco antes de enviar la respuesta
-  // para simular que una persona real está escribiendo.
-  // ============================================================
-  const delayHumano = 1000 + Math.random() * 2000; // 1 a 3 segundos
-  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s antes de enviar (simulando escritura humana)...`);
+  const delayHumano = 1000 + Math.random() * 2000;
+  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s antes de enviar...`);
   await new Promise(r => setTimeout(r, delayHumano));
 
   usuarioData.ultimaInteraccion = Date.now();
@@ -574,4 +603,4 @@ function enviarMensajeFacebook(sender_psid, responseText) {
 // ---------- Arranque ----------
 
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada, Reset cada 24h y Estado Persistente`));
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT} con Failover en Cascada, Reset cada 24h y Modelos Agotados`));
