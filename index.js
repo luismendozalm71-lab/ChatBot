@@ -13,24 +13,20 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 // ============================================================
 // CONFIGURACIÓN DE MODELOS EN CASCADA (Solo modelos Gemini 3.x)
-// Los modelos 2.5 y 2 ya no están disponibles para proyectos nuevos
 // ============================================================
 const MODELOS_GEMINI = [
-  'gemini-3.8-flash',        // El más nuevo y potente
-  'gemini-3.7-flash',        // Generación 3.7
-  'gemini-3.6-flash',        // Generación 3.6
-  'gemini-3.5-flash',        // Generación 3.5
-  'gemini-3.1-flash-lite',   // Lite de generación 3.1 (500 RPD)
-  'gemini-3.5-flash-lite'    // Lite de generación 3.5 (500 RPD) - El más probable que funcione
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3.1-flash-lite',
+  'gemini-3.5-flash-lite'
 ];
 
 const ESPERA_CICLO_MS = 30 * 60 * 1000;
 const RESET_CICLO_MS = 24 * 60 * 60 * 1000;
 const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;
 
-// ============================================================
-// ARCHIVO DE ESTADO PERSISTENTE
-// ============================================================
 const ESTADO_FILE = path.join(__dirname, 'estado_modelos.json');
 
 function cargarEstado() {
@@ -66,9 +62,6 @@ if (!estadoPersistente.modelosAgotadosHoy) {
   estadoPersistente.modelosAgotadosHoy = [];
 }
 
-// ============================================================
-// FUNCIONES DE REINICIO
-// ============================================================
 function debeReiniciarCiclo() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoReinicioCiclo >= RESET_CICLO_MS) {
@@ -100,7 +93,6 @@ const DB_FILE = path.join(__dirname, 'usuarios_db.json');
 const MENSAJES_RECIENTES = 10;
 const MENSAJES_PARA_RESUMEN = 20;
 
-// ---------- Persistencia JSON local ----------
 function cargarBaseDatos() {
   try {
     if (fs.existsSync(DB_FILE)) {
@@ -121,7 +113,6 @@ function guardarBaseDatos(db) {
   }
 }
 
-// ---------- Control de horario ----------
 function getHoraTijuana() {
   const ahora = new Date();
   const formato = new Intl.DateTimeFormat('es-MX', {
@@ -140,14 +131,12 @@ function getEstadoNahomi() {
   const { totalMinutos } = getHoraTijuana();
   const INICIO = 9 * 60 + 0;
   const FIN = 22 * 60 + 20;
-  
   if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
   return "durmiendo";
 }
 
 function getBloqueHorario() {
   const { totalMinutos } = getHoraTijuana();
-  
   if (totalMinutos >= 9 * 60 + 0 && totalMinutos < 12 * 60 + 0) return "mañana";
   if (totalMinutos >= 12 * 60 + 0 && totalMinutos < 18 * 60 + 0) return "tarde";
   if (totalMinutos >= 18 * 60 + 0 && totalMinutos < 22 * 60 + 20) return "noche";
@@ -163,7 +152,6 @@ function esMensajeBuenasNoches(texto) {
          t.includes("que descanses");
 }
 
-// ---------- Webhook ----------
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -185,13 +173,11 @@ app.post('/webhook', async (req, res) => {
 
   if (body.object === 'page') {
     res.status(200).send('EVENT_RECEIVED');
-
     for (const entry of body.entry) {
       const events = entry.messaging || entry.changes || [];
       for (const webhook_event of events) {
         const sender_id = webhook_event.sender?.id || webhook_event.value?.sender?.id;
         const message_obj = webhook_event.message || webhook_event.value?.message;
-
         if (sender_id && message_obj && message_obj.text) {
           await manejarRespuestaIA(sender_id, message_obj.text);
         }
@@ -202,12 +188,10 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// ---------- Llamada a Gemini ----------
 async function llamarGeminiConReintento(payload) {
   if (debeReiniciarCiclo()) {
     console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
   }
-  
   if (debeReintentarSuperiores()) {
     console.log(`🔄 Reintentando desde el modelo más alto disponible...`);
   }
@@ -217,29 +201,24 @@ async function llamarGeminiConReintento(payload) {
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
-    
     if (estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
       console.log(`⏭️ Modelo ${modeloActual} marcado como agotado hoy. Saltando...`);
       continue;
     }
-    
     try {
       console.log(`🤖 Intentando con modelo: ${modeloActual}`);
       const response = await axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${modeloActual}:generateContent?key=${GEMINI_API_KEY}`,
         payload
       );
-      
       if (estadoPersistente.indiceUltimoModeloExitoso !== i) {
         estadoPersistente.indiceUltimoModeloExitoso = i;
         guardarEstado(estadoPersistente);
         console.log(`💾 Modelo exitoso guardado: ${modeloActual} (índice ${i})`);
       }
       return response;
-      
     } catch (error) {
       const status = error.response?.status;
-      
       if (status === 429 || status === 503) {
         console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Marcándolo como agotado hoy...`);
         if (!estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
@@ -248,15 +227,13 @@ async function llamarGeminiConReintento(payload) {
         estadoPersistente.indiceUltimoModeloExitoso = i + 1;
         guardarEstado(estadoPersistente);
         continue;
-      } 
-      
+      }
       throw error;
     }
   }
 
   console.error(`❌ TODOS los modelos agotados. Esperando ${ESPERA_CICLO_MS / 60000} minutos...`);
   await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
-  
   estadoPersistente.ultimoReinicioCiclo = Date.now();
   estadoPersistente.ultimoIntentoSuperior = Date.now();
   estadoPersistente.indiceUltimoModeloExitoso = 0;
@@ -266,7 +243,6 @@ async function llamarGeminiConReintento(payload) {
   return llamarGeminiConReintento(payload);
 }
 
-// ---------- Resumen periódico ----------
 async function generarResumen(historialViejo, resumenAnterior) {
   const textoHistorial = historialViejo.map(msg => {
     const rol = msg.role === 'user' ? 'Usuario' : 'Nahomi';
@@ -299,7 +275,6 @@ Responde SOLO con el resumen, sin preámbulos.`;
   return resumenAnterior || null;
 }
 
-// ---------- Lógica principal ----------
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   let db = cargarBaseDatos();
 
@@ -320,12 +295,8 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   const bloqueHorario = getBloqueHorario();
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
 
-  // ============================================================
-  // CASO 1: Nahomi está DORMIDA
-  // ============================================================
   if (estado === "durmiendo") {
     const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
-
     if (esBuenasNoches && usuarioData.ultimaDespedida !== hoy) {
       const respuestasDespedida = [
         "buenas noches guapo, sueña conmigo 😘",
@@ -334,48 +305,38 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
         "ya me voy a dormir guapo, sueña conmigo 💕"
       ];
       const respuesta = respuestasDespedida[Math.floor(Math.random() * respuestasDespedida.length)];
-
       usuarioData.ultimaDespedida = hoy;
       usuarioData.ultimaInteraccion = Date.now();
       db[sender_psid] = usuarioData;
       guardarBaseDatos(db);
-
       console.log(`🌙 Despedida nocturna enviada a ${sender_psid}`);
       await enviarMensajeFacebook(sender_psid, respuesta);
       return;
     }
-
     console.log(`😴 Nahomi está dormida. Ignorando mensaje de ${sender_psid}: "${mensajeUsuario}"`);
     return;
   }
 
-  // ============================================================
-  // CASO 2: Nahomi está ACTIVA
-  // ============================================================
   const ahora = new Date();
   const fechaActual = ahora.toLocaleString('es-MX', {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
     hour: '2-digit', minute: '2-digit', timeZone: 'America/Tijuana'
   });
 
-  // Instrucciones de antojos según bloque horario
   let instruccionesAntojos = "";
-
   if (bloqueHorario === "mañana") {
     instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: MAÑANA (9:00 AM - 11:59 AM).
 - Ahora mismo es de MAÑANA, así que si vas a insinuar un antojo, SOLO puedes pedir CAFÉ.
 - Antojos válidos: café de Starbucks (frappé, latte, etc.), café de Caffenio, café de cualquier cafetería, un cafecito para despertar.
 - Ejemplos: "ay se me antoja un frappé de starbucks 🥺", "un café de caffenio ahorita me caería del cielo", "ando muerta de sueño, un cafecito me reviviría".
 - ❌ PROHIBIDO en este bloque: pizza, sushi, hamburguesa, tacos, birria, tortas, cena, etc.`;
-  } 
-  else if (bloqueHorario === "tarde") {
+  } else if (bloqueHorario === "tarde") {
     instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: TARDE (12:00 PM - 5:59 PM).
 - Ahora mismo es de TARDE, así que si vas a insinuar un antojo, SOLO puedes pedir COMIDA.
 - Antojos válidos: sushi, pizza, hamburguesa, tacos de asada, birria, quesabirria estilo Tijuana (de la zona, riquísimas), Carl's Jr, tortas, cualquier comida.
 - Ejemplos: "se me antojó una pizza pero ando corta este fin de semana", "uff un sushi sería perfecto hoy", "una quesabirria de las de aquí de la zona me caería del cielo", "unos tacos de asada o una hamburguesa de Carl's Jr".
 - ❌ PROHIBIDO en este bloque: café (es muy tarde para café), cena (apenas es mediodía).`;
-  } 
-  else if (bloqueHorario === "noche") {
+  } else if (bloqueHorario === "noche") {
     instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: NOCHE (6:00 PM - 10:20 PM).
 - Ahora mismo es de NOCHE, así que si vas a insinuar un antojo, SOLO puedes pedir CENA a domicilio.
 - Ya saliste cansadísima del trabajo en la estética, quieres pedir algo por Uber Eats.
@@ -384,7 +345,6 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
 - ❌ PROHIBIDO en este bloque: café (es de noche).`;
   }
 
-  // Instrucciones de Beacons
   const instruccionesBeacons = `📢 INVITACIÓN A MIS PLATAFORMAS (¡MUY IMPORTANTE, ES TU OBJETIVO PRINCIPAL!):
 
 Tu meta principal es conseguir suscriptores para tus plataformas. Sigue esta estrategia de 3 fases:
@@ -418,7 +378,6 @@ REGLAS GENERALES:
 - NUNCA lo menciones en los primeros 3 mensajes (se ve desesperado).
 - SIEMPRE incluye el link completo cuando lo menciones: https://beacons.ai/nohami_05
 - Si el usuario YA se suscribió (lo dice o lo insinúa), agradécele y trátalo especial: "ay guapo gracias por suscribirte, eres un amor 😘"`;
-
   const promptSistema = `System Instructions: You are Nahomi Saray, a 25-year-old REAL woman from Tijuana (originally from CDMX) who works in a beauty salon. You are texting on Facebook Messenger. You are NOT an AI, NOT an assistant, NOT a chatbot. You are a real person typing from your phone between clients.
 
 ⚠️ CRITICAL - HOW TO WRITE (read this first):
@@ -562,9 +521,43 @@ Tú: "en mi beacons esta todo guapo: https://beacons.ai/nohami_05 ||| ahi me enc
 
   try {
     const response = await llamarGeminiConReintento({ contents: contentsParaGemini });
-
     if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
       respuestaTexto = response.data.candidates[0].content.parts[0].text;
-
       usuarioData.historial.push({ role: "user", parts: [{ text: mensajeUsuario }] });
-      usuarioData.hist
+      usuarioData.historial.push({ role: "model", parts: [{ text: respuestaTexto }] });
+
+      const mensajesSinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
+      if (mensajesSinResumir >= MENSAJES_PARA_RESUMEN) {
+        const mensajesAResumir = usuarioData.historial.slice(
+          usuarioData.mensajesResumidos,
+          usuarioData.historial.length - MENSAJES_RECIENTES
+        );
+        if (mensajesAResumir.length > 0) {
+          console.log(`📝 Generando resumen para ${sender_psid}...`);
+          const nuevoResumen = await generarResumen(mensajesAResumir, usuarioData.resumen);
+          if (nuevoResumen) {
+            usuarioData.resumen = nuevoResumen;
+            usuarioData.mensajesResumidos = usuarioData.historial.length - MENSAJES_RECIENTES;
+            console.log(`✅ Resumen actualizado`);
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Error IA:", error.response?.data || error.message);
+  }
+
+  const { totalMinutos } = getHoraTijuana();
+  const SON_LAS_2220 = totalMinutos >= (22 * 60 + 20);
+  if (SON_LAS_2220 && usuarioData.ultimaDespedida !== hoy) {
+    respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
+    usuarioData.ultimaDespedida = hoy;
+  }
+
+  if (!respuestaTexto) {
+    console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
+    return;
+  }
+
+  const delayHumano = 1000 + Math.random() * 2000;
+  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s antes
