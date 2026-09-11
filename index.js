@@ -56,8 +56,8 @@ function getHoraTijuana() {
 
 function getEstadoNahomi() {
   const { totalMinutos } = getHoraTijuana();
-  const INICIO = 9 * 60 + 20;   // 09:20
-  const FIN = 22 * 60 + 20;      // 22:20
+  const INICIO = 9 * 60 + 20;
+  const FIN = 22 * 60 + 20;
   if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
   return "durmiendo";
 }
@@ -194,7 +194,6 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   if (estado === "durmiendo") {
     const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
 
-    // Solo contesta UNA VEZ al día si le dicen buenas noches
     if (esBuenasNoches && usuarioData.ultimaDespedida !== hoy) {
       const respuestasDespedida = [
         "buenas noches guapo, sueña conmigo 😘",
@@ -214,7 +213,6 @@ async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
       return;
     }
 
-    // Cualquier otro mensaje después de dormida → silencio total
     console.log(`😴 Nahomi está dormida. Ignorando mensaje de ${sender_psid}: "${mensajeUsuario}"`);
     return;
   }
@@ -352,7 +350,8 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
     parts: [{ text: mensajeUsuario }]
   });
 
-  let respuestaTexto = "oie guapo ando en la estetica ||| ahorita te contesto bien";
+  // ⭐ Si falla la IA, respuestaTexto queda null y NO se contesta
+  let respuestaTexto = null;
 
   try {
     const response = await llamarGeminiConReintento({ contents: contentsParaGemini });
@@ -393,6 +392,12 @@ Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero si me quieres apoyar 
   if (SON_LAS_2220 && usuarioData.ultimaDespedida !== hoy) {
     respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
     usuarioData.ultimaDespedida = hoy;
+  }
+
+  // ⭐ Si no hubo respuesta de la IA, no contestamos NADA
+  if (!respuestaTexto) {
+    console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
+    return;
   }
 
   usuarioData.ultimaInteraccion = Date.now();
