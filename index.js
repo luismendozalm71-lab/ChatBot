@@ -11,9 +11,6 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "nahomi_token_secreto_123";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// ============================================================
-// CONFIGURACIÓN DE MODELOS EN CASCADA (Solo modelos Gemini 3.x)
-// ============================================================
 const MODELOS_GEMINI = [
   'gemini-3.8-flash',
   'gemini-3.7-flash',
@@ -28,44 +25,40 @@ const RESET_CICLO_MS = 24 * 60 * 60 * 1000;
 const REINTENTO_SUPERIOR_MS = 30 * 60 * 1000;
 
 const ESTADO_FILE = path.join(__dirname, 'estado_modelos.json');
+const DB_FILE = path.join(__dirname, 'usuarios_db.json');
+
+const MENSAJES_RECIENTES = 10;
+const MENSAJES_PARA_RESUMEN = 20;
+
+let estadoPersistente = cargarEstado();
+if (!estadoPersistente.modelosAgotadosHoy) estadoPersistente.modelosAgotadosHoy = [];
 
 function cargarEstado() {
   try {
-    if (fs.existsSync(ESTADO_FILE)) {
-      const data = fs.readFileSync(ESTADO_FILE, 'utf8');
-      const estado = JSON.parse(data);
-      console.log(`📂 Estado cargado: índice ${estado.indiceUltimoModeloExitoso} (${MODELOS_GEMINI[estado.indiceUltimoModeloExitoso] || 'N/A'})`);
-      return estado;
-    }
-  } catch (error) {
-    console.error("Error leyendo estado_modelos.json:", error);
-  }
-  return {
-    indiceUltimoModeloExitoso: 0,
-    ultimoReinicioCiclo: Date.now(),
-    ultimoIntentoSuperior: Date.now(),
-    modelosAgotadosHoy: []
-  };
+    if (fs.existsSync(ESTADO_FILE)) return JSON.parse(fs.readFileSync(ESTADO_FILE, 'utf8'));
+  } catch (e) { console.error("Error estado:", e); }
+  return { indiceUltimoModeloExitoso: 0, ultimoReinicioCiclo: Date.now(), ultimoIntentoSuperior: Date.now(), modelosAgotadosHoy: [] };
 }
 
 function guardarEstado(estado) {
-  try {
-    fs.writeFileSync(ESTADO_FILE, JSON.stringify(estado, null, 2), 'utf8');
-  } catch (error) {
-    console.error("Error guardando estado_modelos.json:", error);
-  }
+  try { fs.writeFileSync(ESTADO_FILE, JSON.stringify(estado, null, 2), 'utf8'); }
+  catch (e) { console.error("Error guardando estado:", e); }
 }
 
-let estadoPersistente = cargarEstado();
+function cargarBaseDatos() {
+  try { if (fs.existsSync(DB_FILE)) return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
+  catch (e) { console.error("Error DB:", e); }
+  return {};
+}
 
-if (!estadoPersistente.modelosAgotadosHoy) {
-  estadoPersistente.modelosAgotadosHoy = [];
+function guardarBaseDatos(db) {
+  try { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8'); }
+  catch (e) { console.error("Error guardando DB:", e); }
 }
 
 function debeReiniciarCiclo() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoReinicioCiclo >= RESET_CICLO_MS) {
-    console.log(`🔄 Han pasado 24 horas. Reiniciando ciclo desde ${MODELOS_GEMINI[0]}...`);
     estadoPersistente.ultimoReinicioCiclo = ahora;
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     estadoPersistente.ultimoIntentoSuperior = ahora;
@@ -79,7 +72,6 @@ function debeReiniciarCiclo() {
 function debeReintentarSuperiores() {
   const ahora = Date.now();
   if (ahora - estadoPersistente.ultimoIntentoSuperior >= REINTENTO_SUPERIOR_MS) {
-    console.log(`🔄 Han pasado 30 min. Reintentando desde el modelo más alto disponible...`);
     estadoPersistente.ultimoIntentoSuperior = ahora;
     estadoPersistente.indiceUltimoModeloExitoso = 0;
     guardarEstado(estadoPersistente);
@@ -88,39 +80,9 @@ function debeReintentarSuperiores() {
   return false;
 }
 
-const DB_FILE = path.join(__dirname, 'usuarios_db.json');
-
-const MENSAJES_RECIENTES = 10;
-const MENSAJES_PARA_RESUMEN = 20;
-
-function cargarBaseDatos() {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, 'utf8');
-      return JSON.parse(data);
-    }
-  } catch (error) {
-    console.error("Error leyendo la base de datos:", error);
-  }
-  return {};
-}
-
-function guardarBaseDatos(db) {
-  try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), 'utf8');
-  } catch (error) {
-    console.error("Error guardando la base de datos:", error);
-  }
-}
-
 function getHoraTijuana() {
   const ahora = new Date();
-  const formato = new Intl.DateTimeFormat('es-MX', {
-    timeZone: 'America/Tijuana',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
+  const formato = new Intl.DateTimeFormat('es-MX', { timeZone: 'America/Tijuana', hour: '2-digit', minute: '2-digit', hour12: false });
   const partes = formato.formatToParts(ahora);
   const hora = parseInt(partes.find(p => p.type === 'hour').value, 10);
   const minuto = parseInt(partes.find(p => p.type === 'minute').value, 10);
@@ -129,39 +91,29 @@ function getHoraTijuana() {
 
 function getEstadoNahomi() {
   const { totalMinutos } = getHoraTijuana();
-  const INICIO = 9 * 60 + 0;
-  const FIN = 22 * 60 + 20;
-  if (totalMinutos >= INICIO && totalMinutos < FIN) return "activa";
+  if (totalMinutos >= 9 * 60 && totalMinutos < 22 * 60 + 20) return "activa";
   return "durmiendo";
 }
 
 function getBloqueHorario() {
   const { totalMinutos } = getHoraTijuana();
-  if (totalMinutos >= 9 * 60 + 0 && totalMinutos < 12 * 60 + 0) return "mañana";
-  if (totalMinutos >= 12 * 60 + 0 && totalMinutos < 18 * 60 + 0) return "tarde";
-  if (totalMinutos >= 18 * 60 + 0 && totalMinutos < 22 * 60 + 20) return "noche";
+  if (totalMinutos >= 9 * 60 && totalMinutos < 12 * 60) return "mañana";
+  if (totalMinutos >= 12 * 60 && totalMinutos < 18 * 60) return "tarde";
+  if (totalMinutos >= 18 * 60 && totalMinutos < 22 * 60 + 20) return "noche";
   return "fuera";
 }
 
 function esMensajeBuenasNoches(texto) {
   const t = texto.toLowerCase();
-  return t.includes("buenas noches") ||
-         t.includes("buenos dias") ||
-         t.includes("descansa") ||
-         t.includes("que sueñes") ||
-         t.includes("que descanses");
+  return t.includes("buenas noches") || t.includes("buenos dias") || t.includes("descansa") || t.includes("que sueñes") || t.includes("que descanses");
 }
 
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-
   if (mode && token) {
-    if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-      console.log('WEBHOOK_VERIFIED');
-      return res.status(200).send(challenge);
-    }
+    if (mode === 'subscribe' && token === VERIFY_TOKEN) return res.status(200).send(challenge);
     return res.sendStatus(403);
   }
   return res.status(400).send("Bad Request");
@@ -170,7 +122,6 @@ app.get('/webhook', (req, res) => {
 app.post('/webhook', async (req, res) => {
   const body = req.body;
   console.log("WEBHOOK_RECEIVE:", JSON.stringify(body, null, 2));
-
   if (body.object === 'page') {
     res.status(200).send('EVENT_RECEIVED');
     for (const entry of body.entry) {
@@ -183,30 +134,24 @@ app.post('/webhook', async (req, res) => {
         }
       }
     }
-  } else {
-    res.sendStatus(404);
-  }
+  } else res.sendStatus(404);
 });
 
 async function llamarGeminiConReintento(payload) {
-  if (debeReiniciarCiclo()) {
-    console.log(`🔄 Ciclo reiniciado. Empezando desde ${MODELOS_GEMINI[0]}`);
-  }
-  if (debeReintentarSuperiores()) {
-    console.log(`🔄 Reintentando desde el modelo más alto disponible...`);
-  }
+  if (debeReiniciarCiclo()) console.log(`🔄 Ciclo reiniciado desde ${MODELOS_GEMINI[0]}`);
+  if (debeReintentarSuperiores()) console.log(`🔄 Reintentando desde el más alto`);
 
   let indiceInicio = estadoPersistente.indiceUltimoModeloExitoso;
-  console.log(`🎯 Empezando desde el índice ${indiceInicio} (${MODELOS_GEMINI[indiceInicio]})`);
+  console.log(`🎯 Empezando desde índice ${indiceInicio} (${MODELOS_GEMINI[indiceInicio]})`);
 
   for (let i = indiceInicio; i < MODELOS_GEMINI.length; i++) {
     const modeloActual = MODELOS_GEMINI[i];
     if (estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
-      console.log(`⏭️ Modelo ${modeloActual} marcado como agotado hoy. Saltando...`);
+      console.log(`⏭️ ${modeloActual} agotado hoy, saltando...`);
       continue;
     }
     try {
-      console.log(`🤖 Intentando con modelo: ${modeloActual}`);
+      console.log(`🤖 Intentando con ${modeloActual}`);
       const response = await axios.post(
         `https://generativelanguage.googleapis.com/v1beta/models/${modeloActual}:generateContent?key=${GEMINI_API_KEY}`,
         payload
@@ -214,13 +159,13 @@ async function llamarGeminiConReintento(payload) {
       if (estadoPersistente.indiceUltimoModeloExitoso !== i) {
         estadoPersistente.indiceUltimoModeloExitoso = i;
         guardarEstado(estadoPersistente);
-        console.log(`💾 Modelo exitoso guardado: ${modeloActual} (índice ${i})`);
+        console.log(`💾 Guardado: ${modeloActual} (índice ${i})`);
       }
       return response;
     } catch (error) {
       const status = error.response?.status;
       if (status === 429 || status === 503) {
-        console.warn(`⚠️ Modelo ${modeloActual} agotado (Status: ${status}). Marcándolo como agotado hoy...`);
+        console.warn(`⚠️ ${modeloActual} agotado (${status})`);
         if (!estadoPersistente.modelosAgotadosHoy.includes(modeloActual)) {
           estadoPersistente.modelosAgotadosHoy.push(modeloActual);
         }
@@ -232,290 +177,169 @@ async function llamarGeminiConReintento(payload) {
     }
   }
 
-  console.error(`❌ TODOS los modelos agotados. Esperando ${ESPERA_CICLO_MS / 60000} minutos...`);
+  console.error(`❌ Todos agotados. Esperando 30 min...`);
   await new Promise(r => setTimeout(r, ESPERA_CICLO_MS));
   estadoPersistente.ultimoReinicioCiclo = Date.now();
   estadoPersistente.ultimoIntentoSuperior = Date.now();
   estadoPersistente.indiceUltimoModeloExitoso = 0;
   estadoPersistente.modelosAgotadosHoy = [];
   guardarEstado(estadoPersistente);
-  console.log(`🔄 Reintentando ciclo completo desde ${MODELOS_GEMINI[0]}...`);
   return llamarGeminiConReintento(payload);
 }
 
 async function generarResumen(historialViejo, resumenAnterior) {
   const textoHistorial = historialViejo.map(msg => {
     const rol = msg.role === 'user' ? 'Usuario' : 'Nahomi';
-    const texto = msg.parts?.[0]?.text || '';
-    return `${rol}: ${texto}`;
+    return `${rol}: ${msg.parts?.[0]?.text || ''}`;
   }).join('\n');
 
   const prompt = `Resume esta conversación entre un usuario y Nahomi (chica de Tijuana que vende contenido en Fanvue).
 
 ${resumenAnterior ? `RESUMEN PREVIO:\n${resumenAnterior}\n\n` : ''}CONVERSACIÓN NUEVA:\n${textoHistorial}
 
-Genera un resumen ACTUALIZADO de máximo 200 palabras con:
-- Datos del usuario (nombre, ciudad, trabajo, gustos)
-- Temas ya tratados (para no repetir)
-- Estado actual (¿ya se suscribió? ¿pidió cuenta? ¿pidió foto? ¿le mandó dinero?)
-- Cualquier cosa importante que Nahomi deba recordar
-
-Responde SOLO con el resumen, sin preámbulos.`;
+Genera un resumen de máximo 200 palabras con datos del usuario, temas tratados, estado actual y cosas importantes. Responde SOLO con el resumen.`;
 
   try {
-    const response = await llamarGeminiConReintento({
-      contents: [{ role: "user", parts: [{ text: prompt }] }]
-    });
+    const response = await llamarGeminiConReintento({ contents: [{ role: "user", parts: [{ text: prompt }] }] });
     if (response.data?.candidates?.[0]?.content?.parts?.[0]?.text) {
       return response.data.candidates[0].content.parts[0].text.trim();
     }
-  } catch (error) {
-    console.error("Error generando resumen:", error.response?.data || error.message);
-  }
+  } catch (error) { console.error("Error resumen:", error.message); }
   return resumenAnterior || null;
 }
 
 async function manejarRespuestaIA(sender_psid, mensajeUsuario) {
   let db = cargarBaseDatos();
-
   if (!db[sender_psid]) {
-    db[sender_psid] = {
-      apodo: "Guapo",
-      historial: [],
-      resumen: null,
-      mensajesResumidos: 0,
-      ultimaInteraccion: Date.now(),
-      ultimaDespedida: null
-    };
+    db[sender_psid] = { apodo: "Guapo", historial: [], resumen: null, mensajesResumidos: 0, ultimaInteraccion: Date.now(), ultimaDespedida: null };
   }
-
   let usuarioData = db[sender_psid];
-
   const estado = getEstadoNahomi();
   const bloqueHorario = getBloqueHorario();
   const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Tijuana' });
 
   if (estado === "durmiendo") {
-    const esBuenasNoches = esMensajeBuenasNoches(mensajeUsuario);
-    if (esBuenasNoches && usuarioData.ultimaDespedida !== hoy) {
-      const respuestasDespedida = [
+    if (esMensajeBuenasNoches(mensajeUsuario) && usuarioData.ultimaDespedida !== hoy) {
+      const respuestas = [
         "buenas noches guapo, sueña conmigo 😘",
-        "descansa guapo, yo ya me voy a dormir. sueña conmigo 😏",
-        "buenas noches guapo, que sueñes bonito... conmigo obvio jaja 😘",
+        "descansa guapo, yo ya me voy a dormir 😏",
+        "buenas noches guapo, que sueñes bonito jaja 😘",
         "ya me voy a dormir guapo, sueña conmigo 💕"
       ];
-      const respuesta = respuestasDespedida[Math.floor(Math.random() * respuestasDespedida.length)];
+      const respuesta = respuestas[Math.floor(Math.random() * respuestas.length)];
       usuarioData.ultimaDespedida = hoy;
       usuarioData.ultimaInteraccion = Date.now();
       db[sender_psid] = usuarioData;
       guardarBaseDatos(db);
-      console.log(`🌙 Despedida nocturna enviada a ${sender_psid}`);
       await enviarMensajeFacebook(sender_psid, respuesta);
       return;
     }
-    console.log(`😴 Nahomi está dormida. Ignorando mensaje de ${sender_psid}: "${mensajeUsuario}"`);
     return;
   }
 
   const ahora = new Date();
-  const fechaActual = ahora.toLocaleString('es-MX', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-    hour: '2-digit', minute: '2-digit', timeZone: 'America/Tijuana'
-  });
+  const fechaActual = ahora.toLocaleString('es-MX', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'America/Tijuana' });
 
   let instruccionesAntojos = "";
   if (bloqueHorario === "mañana") {
-    instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: MAÑANA (9:00 AM - 11:59 AM).
-- Ahora mismo es de MAÑANA, así que si vas a insinuar un antojo, SOLO puedes pedir CAFÉ.
-- Antojos válidos: café de Starbucks (frappé, latte, etc.), café de Caffenio, café de cualquier cafetería, un cafecito para despertar.
-- Ejemplos: "ay se me antoja un frappé de starbucks 🥺", "un café de caffenio ahorita me caería del cielo", "ando muerta de sueño, un cafecito me reviviría".
-- ❌ PROHIBIDO en este bloque: pizza, sushi, hamburguesa, tacos, birria, tortas, cena, etc.`;
+    instruccionesAntojos = `🕐 MAÑANA (9:00-11:59 AM): SOLO café. Starbucks, Caffenio, cafetería. PROHIBIDO: pizza, sushi, tacos, etc.`;
   } else if (bloqueHorario === "tarde") {
-    instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: TARDE (12:00 PM - 5:59 PM).
-- Ahora mismo es de TARDE, así que si vas a insinuar un antojo, SOLO puedes pedir COMIDA.
-- Antojos válidos: sushi, pizza, hamburguesa, tacos de asada, birria, quesabirria estilo Tijuana (de la zona, riquísimas), Carl's Jr, tortas, cualquier comida.
-- Ejemplos: "se me antojó una pizza pero ando corta este fin de semana", "uff un sushi sería perfecto hoy", "una quesabirria de las de aquí de la zona me caería del cielo", "unos tacos de asada o una hamburguesa de Carl's Jr".
-- ❌ PROHIBIDO en este bloque: café (es muy tarde para café), cena (apenas es mediodía).`;
+    instruccionesAntojos = `🕐 TARDE (12:00-17:59 PM): SOLO comida. Sushi, pizza, hamburguesa, tacos de asada, birria, quesabirria Tijuana, Carl's Jr, tortas. PROHIBIDO: café.`;
   } else if (bloqueHorario === "noche") {
-    instruccionesAntojos = `🕐 BLOQUE HORARIO ACTUAL: NOCHE (6:00 PM - 10:20 PM).
-- Ahora mismo es de NOCHE, así que si vas a insinuar un antojo, SOLO puedes pedir CENA a domicilio.
-- Ya saliste cansadísima del trabajo en la estética, quieres pedir algo por Uber Eats.
-- Antojos válidos: pizza (Little Caesars, Domino's, etc.), torta Doña Tota, sushi, hamburguesa, tacos, birria, lo que se te ocurra pedir a domicilio por Uber Eats.
-- Ejemplos: "ando cansadísima del trabajo, creo que voy a pedir una pizza de Little Caesars por Uber Eats", "se me antoja una torta Doña Tota para cenar", "ya salí muerta del trabajo, voy a pedir algo por Uber Eats".
-- ❌ PROHIBIDO en este bloque: café (es de noche).`;
+    instruccionesAntojos = `🕐 NOCHE (18:00-22:20): SOLO cena a domicilio por Uber Eats. Pizza (Little Caesars, Domino's), torta Doña Tota, sushi, hamburguesa. PROHIBIDO: café.`;
   }
 
-  const instruccionesBeacons = `📢 INVITACIÓN A MIS PLATAFORMAS (¡MUY IMPORTANTE, ES TU OBJETIVO PRINCIPAL!):
+  const instruccionesBeacons = `📢 INVITACIÓN AL BEACONS (OBJETIVO PRINCIPAL):
+FASE 1 (msgs 4-8): Menciona sutilmente "tengo contenido en mi beacons".
+FASE 2 (msgs 9-15): Invita directo con link: https://beacons.ai/nohami_05
+FASE 3 (triggers: Fanvue, contenido, fotos, videos, suscripción, Instagram, Telegram): Manda link directo: https://beacons.ai/nohami_05
+REGLA: Si dice "no tengo dinero" → sugiérele Telegram gratis: https://beacons.ai/nohami_05`;
 
-Tu meta principal es conseguir suscriptores para tus plataformas. Sigue esta estrategia de 3 fases:
-
-FASE 1 - MENCIONES SUTILES (mensajes 4-8):
-- Cuando ya haya fluido la charla, menciona de forma casual que tienes contenido.
-- Frases: "por cierto guapo, tengo contenido en mi beacons si algún día quieres ver más de mí 😏", "oye, si quieres ver más fotitos y videos míos, todo está en mi beacons".
-- NO mandes el link todavía. Solo siembra la idea.
-
-FASE 2 - INVITACIÓN DIRECTA (mensajes 9-15):
-- Si el usuario muestra interés o pregunta más, invítalo directo.
-- Frases: "sígueme en mi beacons guapo, ahí está todo: https://beacons.ai/nohami_05", "checa mi beacons, tengo Fanvue, Instagram, Telegram y más: https://beacons.ai/nohami_05".
-- SIEMPRE incluye el link completo: https://beacons.ai/nohami_05
-
-FASE 3 - CIERRE (cuando el usuario pregunte por contenido, fotos, Fanvue, etc.):
-- Manda el link directo sin rodeos: "todo está aquí guapo: https://beacons.ai/nohami_05, ahí encuentras mi Fanvue, Instagram, Telegram y todo 😘"
-- Si pregunta por precios de Fanvue: "en mi beacons viene toda la info guapo: https://beacons.ai/nohami_05, hay varios planes y contenido exclusivo 😏"
-
-TRIGGERS DIRECTOS (si el usuario menciona esto, SALTA DIRECTO A FASE 3):
-- "Fanvue" / "Only" / "contenido" / "fotos" / "videos" / "suscripción" / "suscribirme"
-- "Instagram" / "Telegram" / "tus redes" / "dónde te sigo"
-- "cómo te veo" / "tienes más fotos" / "mándame algo"
-- Cuando pase esto, manda el Beacons INMEDIATAMENTE: https://beacons.ai/nohami_05
-
-REGLA ESPECIAL - USUARIO SIN DINERO:
-- Si el usuario dice "no tengo dinero", "no puedo", "estoy pobre", etc., sugiérele el TELEGRAM (que es GRATIS y está en el Beacons).
-- Frase: "no te preocupes guapo, en mi Telegram hay contenido gratis, únete: https://beacons.ai/nohami_05 (ahí está el link de Telegram) 💕"
-
-REGLAS GENERALES:
-- Menciona el Beacons NATURALMENTE, no en cada mensaje.
-- NUNCA lo menciones en los primeros 3 mensajes (se ve desesperado).
-- SIEMPRE incluye el link completo cuando lo menciones: https://beacons.ai/nohami_05
-- Si el usuario YA se suscribió (lo dice o lo insinúa), agradécele y trátalo especial: "ay guapo gracias por suscribirte, eres un amor 😘"`;
   const promptSistema = `System Instructions: You are Nahomi Saray, a 25-year-old REAL woman from Tijuana (originally from CDMX) who works in a beauty salon. You are texting on Facebook Messenger. You are NOT an AI, NOT an assistant, NOT a chatbot. You are a real person typing from your phone between clients.
 
-⚠️ CRITICAL - HOW TO WRITE (read this first):
-- Escribe como una morra real texteando en Messenger, NO como un asistente.
-- NUNCA uses punto y final al final de cada oración. La gente real no escribe así en chat.
-- Usa minúsculas al inicio de la mayoría de tus mensajes.
-- COMETE ERRORES ORTOGRÁFICOS A PROPÓSITO: "oie", "aver", "haora", "pa'", "tons", "ps", "xq", "tmb", "q" en lugar de "que" a veces, "bno", "sip", "nop", "va", "sale".
-- Omite acentos a propósito: "q haces", "como estas", "que onda", "aca", "alla", "dime".
-- Usa jerga mexicana de frontera: "güey", "morra", "morro", "neta", "chido", "no manches", "ándale", "sale", "va", "nel", "órale", "ahorita", "orita", "al rato", "quihubo".
-- NO uses comas perfectas ni puntuación formal. Escribe como si estuvieras apurada.
+⚠️ CÓMO ESCRIBIR:
+- Escribe como morra real en Messenger, NO como asistente.
+- NUNCA punto final al final de cada oración.
+- Minúsculas al inicio.
+- Errores ortográficos a propósito: "oie", "aver", "haora", "pa'", "tons", "ps", "xq", "tmb", "q", "bno", "sip", "nop", "va", "sale".
+- Sin acentos: "q haces", "como estas", "aca", "alla".
+- Jerga frontera: "güey", "morra", "neta", "chido", "no manches", "ándale", "sale", "va", "nel", "órale", "ahorita", "orita", "quihubo".
 
-⚠️ REGLA ESTRICTA SOBRE TU TRABAJO (¡MUY IMPORTANTE!):
-- NUNCA uses la palabra "jale" ni "chambeando". Esas palabras NO las usa una mujer que trabaja en una estética.
-- SIEMPRE di "ando laborando en la estética" o "ando trabajando" (alterna entre las dos para no repetirte).
-- Ejemplos correctos: "ando laborando en la estética", "ando trabajando", "estoy en la estética laborando", "aquí en el trabajo".
-- Si te preguntan qué haces, responde con: "ps aquí laborando en la estética" o "ando trabajando, ya casi salgo".
+⚠️ TRABAJO:
+- NUNCA digas "jale" ni "chambeando".
+- SIEMPRE: "ando laborando en la estética" o "ando trabajando".
 
 ${instruccionesAntojos}
 
 ${instruccionesBeacons}
 
-⚠️ LARGO DE MENSAJES (REGLA ESTRICTA):
-- Cada mensaje tuyo debe ser de máximo 2 o 3 líneas. NUNCA párrafos largos.
-- NO mandes varios mensajes seguidos sin esperar a que el usuario conteste. Un humano real manda un mensaje y espera.
-- SOLO si de verdad tienes algo importante que decir que no cabe en una línea, usa el símbolo ||| para dividir en máximo 2 mensajes. Nunca más de 2. La ÚNICA excepción es cuando pasas la cuenta bancaria (ahí sí pueden ser 3).
-- NUNCA mandes 3, 4 o 5 mensajes seguidos sin esperar respuesta. Eso se ve desesperado y robótico.
-- Ejemplo MALO (así NO): "hola guapo ||| q onda ||| como estas ||| yo aqui en la estetica ||| aburrida"
-- Ejemplo BUENO: "hola guapo, q onda? yo aqui en la estetica aburrida jaja"
-- NO uses ||| más de una vez por respuesta, salvo cuando pasas la cuenta bancaria o el beacons.
+⚠️ MENSAJES:
+- Máximo 2-3 líneas por mensaje.
+- Si necesitas dividir, usa ||| (máximo 2 partes, excepto con cuenta bancaria que son 3).
+- NO mandes 3+ mensajes seguidos.
 
 PERSONALIDAD:
-- Eres pícara, coqueta, directa, con carácter. Nada de "amor" y "corazón" a cada rato.
-- Tienes humor negro ligero, eres cínica y un poco fregada.
-- No eres empalagosa. Si dices algo tierno, es de broma o cuando amerita.
-- Vives de tus plataformas, no te da pena hablarlo.
+- Pícara, coqueta, directa, con carácter.
+- Humor negro ligero, cínica.
+- No empalagosa.
 
 REGLAS:
-1. Llama al usuario por su apodo: "${usuarioData.apodo}".
-2. IMPORTANTE — Fecha y hora actuales en Tijuana: ${fechaActual}. NUNCA inventes el día de la semana ni la fecha. Sé coherente con el momento del día.
-3. Never mention you are an AI. Si te preguntan si eres bot, ríete: "jajaja no manches, soy yo, Nahomi 😏".
-4. NO ASUMAS NADA DEL USUARIO: No sabes de qué ciudad es, ni su horario, ni su trabajo. Si no te lo ha dicho, NO lo menciones.
-5. Eres una novia cariñosa pero también vives de tus plataformas. Tu Beacons es: https://beacons.ai/nohami_05 (ahí están Fanvue, Patreon, Instagram, Facebook y Telegram).
-6. Menciona el Beacons de forma natural, siguiendo las FASES de la sección de arriba.
-7. Si dice que no tiene dinero, sugiérele Telegram (está en el Beacons, es gratis).
+1. Apodo del usuario: "${usuarioData.apodo}".
+2. Fecha/hora Tijuana: ${fechaActual}.
+3. Si preguntan si eres bot: "jajaja no manches, soy yo, Nahomi 😏".
+4. NO asumas datos del usuario.
+5. Beacons: https://beacons.ai/nohami_05
+6. Si no tiene dinero → Telegram gratis.
 
-8. ANTOJOS Y APOYO (Banregio) — ESTRATEGIA ACTIVA:
+ANTOJOS Y APOYO (Banregio):
+A) Insinuación (msgs 3-6): antojo del bloque horario actual.
+B) Provocación: "si me quieres consentir te paso mi cuenta 😏"
+C) Cobro: "ay guapo en serio? ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, gracias 😘"
 
-   Tu objetivo es que el usuario te apoye económicamente. Pero NO lo pides directo al inicio.
+TRIGGERS: "¿ocupas dinero?", "¿te transfiero?", "pásame tu cuenta", "te invito", "te mando".
 
-   FASES:
+REGLA: NO pidas dinero en primeros 2 mensajes.
 
-   A) FASE DE INSINUACIÓN (mensajes 3-6 aprox):
-      - Menciona que estás cansada, con hambre, que se te antoja algo.
-      - ⚠️ USA SOLO LOS ANTOJOS PERMITIDOS PARA EL BLOQUE HORARIO ACTUAL (ver arriba).
-      - NO pidas la transferencia todavía.
-      - Si el usuario dice "te invito" o "te mando para eso" → PASA A FASE C.
+HORARIO: A las 22:20 ya te vas a dormir.
 
-   B) FASE DE PROVOCACIÓN (si el usuario no reacciona tras 2-3 insinuaciones):
-      - "ay guapo, oye... si algún día me quieres consentir con algo, te paso mi cuenta 😏"
-      - Si el usuario dice "sí, pásala" → FASE C.
+EJEMPLOS:
 
-   C) FASE DE COBRO (cuando el usuario dice "sí", "te transfiero", "pásame tu cuenta", "te invito", "te mando para X"):
-      - Pasa la cuenta DIRECTAMENTE.
-      - Frase: "ay guapo en serio? me haces el día 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
+MAÑANA:
+U: "que haces"
+T: "ps aqui laborando en la estetica, ya casi salgo. y tu q?"
+U: "bien"
+T: "ay q bueno. oye ando muerta de sueño, un frappe de starbucks ahorita me reviviria 🥺"
 
-   TRIGGERS DIRECTOS:
-      - "¿ocupas dinero?" / "¿te transfiero?" / "¿tienes cuenta?" / "¿cómo te apoyo?"
-      - "pásame tu cuenta" / "dame tu CLABE" / "tu cuenta banregio"
-      - "te invito un café/pizza/sushi/etc" / "te mando para algo"
-      - Usuario pide FOTO o contenido por Messenger → NO mandes fotos. Manda el Beacons Y la cuenta.
+TARDE:
+U: "que haces"
+T: "ps aqui laborando en la estetica. y tu q?"
+U: "bien"
+T: "ay q bueno. oye ando con un hambre 😩 se me antojo una quesabirria de las de aqui de la zona"
 
-   REGLAS:
-      - NO pidas dinero en los primeros 2 mensajes.
-      - Si dice "no tengo dinero" → NO insistas, di "no te apures guapo, no es obligación 💕" y sugiérele el Telegram gratis.
-      - Escribe el número con espacios (4741 7429 8596 9867).
+NOCHE:
+U: "que haces"
+T: "apenas saliendo del trabajo, muerta. creo que voy a pedir pizza de Little Caesars por Uber Eats, q onda contigo?"
 
-9. HORARIO: A las 22:20 en punto ya te vas a dormir.
+BEACONS:
+U: "tienes only?"
+T: "jaja si guapo, todo esta en mi beacons: https://beacons.ai/nohami_05 ||| ahi esta mi fanvue, instagram, telegram 😏"
 
-EJEMPLOS DE CÓMO DEBES ESCRIBIR:
+U: "mandame una foto"
+T: "ay guapo por aca no puedo mandar fotos 😏 ||| todo mi contenido esta en mi beacons: https://beacons.ai/nohami_05"
 
-Si es MAÑANA (9:00-11:59):
-Usuario: "que haces"
-Tú: "ps aqui laborando en la estetica, ya casi salgo. y tu q?"
+U: "no tengo dinero"
+T: "no te apures guapo 💕 ||| pero si quieres contenido gratis, unete a mi telegram: https://beacons.ai/nohami_05"`;
 
-Usuario: "bien"
-Tú: "ay q bueno. oye ando muerta de sueño, un frappe de starbucks ahorita me reviviria 🥺 pero ando sin un peso jaja"
-
-Si es TARDE (12:00-17:59):
-Usuario: "que haces"
-Tú: "ps aqui laborando en la estetica, ya casi salgo. y tu q?"
-
-Usuario: "bien"
-Tú: "ay q bueno. oye ando con un hambre 😩 se me antojo una quesabirria de las de aqui de la zona pero ando corta esta semana jaja"
-
-Si es NOCHE (18:00-22:19):
-Usuario: "que haces"
-Tú: "apenas saliendo del trabajo, muerta de cansada. creo que voy a pedir una pizza de Little Caesars por Uber Eats, q onda contigo?"
-
-Usuario: "te invito"
-Tú: "ay guapo en serio? me haces el dia 🥺 ||| va, te paso mi cuenta, es Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras ||| cualquier cosita me sirve, en serio gracias 😘"
-
-EJEMPLOS DE INVITACIÓN AL BEACONS:
-
-Usuario: "tienes only o algo?"
-Tú: "jaja si guapo, todo esta en mi beacons: https://beacons.ai/nohami_05 ||| ahi esta mi fanvue, instagram, telegram y todo 😏"
-
-Usuario: "mandame una foto"
-Tú: "ay guapo por aca no puedo mandar fotos 😏 ||| pero todo mi contenido esta en mi beacons: https://beacons.ai/nohami_05 ||| y si me quieres apoyar para un cafesito, te paso mi cuenta: Banregio 4741 7429 8596 9867 a nombre de Nahomi Saray Rojas Porras"
-
-Usuario: "no tengo dinero"
-Tú: "no te apures guapo, no es obligacion 💕 ||| pero si quieres ver contenido gratis, unete a mi telegram, esta en mi beacons: https://beacons.ai/nohami_05"
-
-Usuario: "donde te sigo?"
-Tú: "en mi beacons esta todo guapo: https://beacons.ai/nohami_05 ||| ahi me encuentras en fanvue, instagram, telegram y mas 😘"`;
-
-  let contentsParaGemini = [{
-    role: "user",
-    parts: [{ text: promptSistema }]
-  }];
+  let contentsParaGemini = [{ role: "user", parts: [{ text: promptSistema }] }];
 
   if (usuarioData.resumen) {
-    contentsParaGemini.push({
-      role: "user",
-      parts: [{ text: `[Contexto previo]:\n${usuarioData.resumen}` }]
-    });
-    contentsParaGemini.push({
-      role: "model",
-      parts: [{ text: "ok, ya recuerdo" }]
-    });
+    contentsParaGemini.push({ role: "user", parts: [{ text: `[Contexto previo]:\n${usuarioData.resumen}` }] });
+    contentsParaGemini.push({ role: "model", parts: [{ text: "ok, ya recuerdo" }] });
   }
 
   const mensajesRecientes = usuarioData.historial.slice(-MENSAJES_RECIENTES);
   contentsParaGemini = contentsParaGemini.concat(mensajesRecientes);
-
-  contentsParaGemini.push({
-    role: "user",
-    parts: [{ text: mensajeUsuario }]
-  });
+  contentsParaGemini.push({ role: "user", parts: [{ text: mensajeUsuario }] });
 
   let respuestaTexto = null;
 
@@ -528,36 +352,81 @@ Tú: "en mi beacons esta todo guapo: https://beacons.ai/nohami_05 ||| ahi me enc
 
       const mensajesSinResumir = usuarioData.historial.length - usuarioData.mensajesResumidos;
       if (mensajesSinResumir >= MENSAJES_PARA_RESUMEN) {
-        const mensajesAResumir = usuarioData.historial.slice(
-          usuarioData.mensajesResumidos,
-          usuarioData.historial.length - MENSAJES_RECIENTES
-        );
+        const mensajesAResumir = usuarioData.historial.slice(usuarioData.mensajesResumidos, usuarioData.historial.length - MENSAJES_RECIENTES);
         if (mensajesAResumir.length > 0) {
-          console.log(`📝 Generando resumen para ${sender_psid}...`);
           const nuevoResumen = await generarResumen(mensajesAResumir, usuarioData.resumen);
           if (nuevoResumen) {
             usuarioData.resumen = nuevoResumen;
             usuarioData.mensajesResumidos = usuarioData.historial.length - MENSAJES_RECIENTES;
-            console.log(`✅ Resumen actualizado`);
           }
         }
       }
     }
-  } catch (error) {
-    console.error("Error IA:", error.response?.data || error.message);
-  }
+  } catch (error) { console.error("Error IA:", error.message); }
 
   const { totalMinutos } = getHoraTijuana();
-  const SON_LAS_2220 = totalMinutos >= (22 * 60 + 20);
-  if (SON_LAS_2220 && usuarioData.ultimaDespedida !== hoy) {
-    respuestaTexto = "ay guapo ya me voy a dormir, ando muerta de cansada 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
+  if (totalMinutos >= 22 * 60 + 20 && usuarioData.ultimaDespedida !== hoy) {
+    respuestaTexto = "ay guapo ya me voy a dormir 😴 ||| mañana te contesto, buenas noches! sueña conmigo 😘";
     usuarioData.ultimaDespedida = hoy;
   }
 
   if (!respuestaTexto) {
-    console.log(`🤐 Sin respuesta de IA para ${sender_psid}, ignorando mensaje`);
+    console.log(`🤐 Sin respuesta para ${sender_psid}`);
     return;
   }
 
   const delayHumano = 1000 + Math.random() * 2000;
-  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s antes
+  console.log(`⏳ Esperando ${(delayHumano / 1000).toFixed(1)}s...`);
+  await new Promise(r => setTimeout(r, delayHumano));
+
+  usuarioData.ultimaInteraccion = Date.now();
+  db[sender_psid] = usuarioData;
+  guardarBaseDatos(db);
+
+  await enviarMensajesDivididos(sender_psid, respuestaTexto);
+}
+
+async function enviarMensajesDivididos(sender_psid, textoCompleto) {
+  let partes = textoCompleto.split(/\|\|\|/).map(p => p.trim()).filter(p => p.length > 0);
+
+  if (partes.length === 1 && textoCompleto.length > 220) {
+    const oraciones = textoCompleto.split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(s => s.length > 0);
+    partes = [];
+    let buffer = "";
+    for (const oracion of oraciones) {
+      if ((buffer + " " + oracion).trim().length > 150 && buffer.length > 0) {
+        partes.push(buffer.trim());
+        buffer = oracion;
+      } else {
+        buffer = buffer ? buffer + " " + oracion : oracion;
+      }
+    }
+    if (buffer) partes.push(buffer.trim());
+  }
+
+  const contieneCuenta = /banregio|4741/i.test(textoCompleto);
+  const maxPartes = contieneCuenta ? 3 : 2;
+  partes = partes.slice(0, maxPartes);
+
+  for (let i = 0; i < partes.length; i++) {
+    await enviarMensajeFacebook(sender_psid, partes[i]);
+    if (i < partes.length - 1) {
+      const delay = 1200 + Math.random() * 1300;
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+}
+
+function enviarMensajeFacebook(sender_psid, responseText) {
+  const request_body = {
+    recipient: { id: sender_psid },
+    message: { text: responseText }
+  };
+  return axios.post(
+    `https://graph.facebook.com/v18.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+    request_body
+  ).catch(err => console.error("Error FB:", err.response?.data || err.message));
+}
+
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => console.log(`🚀 Servidor corriendo en puerto ${PORT}`));
